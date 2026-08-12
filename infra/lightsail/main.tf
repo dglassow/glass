@@ -8,12 +8,16 @@
 
 terraform {
   required_version = ">= 1.5"
+  # Partial backend — the account-specific bucket/table/region live in a
+  # gitignored backend.hcl (see backend.hcl.example), passed at init time:
+  #   terraform init -backend-config=backend.hcl
+  backend "s3" {}
   required_providers {
     aws = { source = "hashicorp/aws", version = "~> 5.0" }
   }
 }
 
-variable "region" { default = "us-west-2" }
+variable "region" { default = "us-east-2" }
 variable "instance_name" { default = "glass-relay" }
 variable "bundle_id" { default = "nano_3_0" } # smallest Lightsail plan
 variable "blueprint_id" { default = "amazon_linux_2023" }

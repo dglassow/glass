@@ -7,6 +7,14 @@ dist-web/
 packages/desktop/src-tauri/target/
 packages/desktop/src-tauri/gen/
 
+# Terraform — state and account-specific backend/vars never go in the public repo
+infra/**/.terraform/
+infra/**/*.tfstate
+infra/**/*.tfstate.*
+infra/**/backend.hcl
+infra/**/*.tfvars
+infra/**/*.auto.tfvars
+
 # Secrets and instance config never belong in this repo.
 # All of it lives in the backup bundle instead.
 .env

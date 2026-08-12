@@ -1,0 +1,9 @@
+# Terraform S3 backend config (partial). Copy to backend.hcl (gitignored) and
+# fill in for your account, then:  terraform init -backend-config=backend.hcl
+#
+# The bucket + lock table are created by bootstrap.sh before the first init.
+bucket         = "glass-tfstate-<ACCOUNT_ID>"
+key            = "lightsail/terraform.tfstate"
+region         = "us-east-2"
+dynamodb_table = "glass-tf-locks"
+encrypt        = true

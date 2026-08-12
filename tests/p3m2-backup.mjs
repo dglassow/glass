@@ -13,6 +13,8 @@ import { spawnSync, execFileSync, } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
 import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 
+const { GitStore } = await import(new URL("../packages/hub/dist/git/index.js", import.meta.url).href);
+
 const realPubKey = () => {
   const { publicKey } = generateKeyPairSync("ed25519");
   const jwk = publicKey.export({ format: "jwk" });
@@ -25,9 +27,11 @@ const RUN = `/tmp/glass-p3m2-${process.pid}`;
 const TS = `${RUN}/trust.json`;
 const DB = `${RUN}/vault.db`;
 const BUNDLE = `${RUN}/backup.glassbundle`;
+const GITROOT = `${RUN}/git`;
 const PASS = "fixture passphrase 9 lively";
 const REC = "JBSWY3DPEHPK3PXPJBSWY3DPEH";
 const MARK = "tok_BACKUP_SECRET_9z8y7x";
+const GITMARK = "hosted-repo-content-Q7w8e9";
 
 const checks = [];
 const check = (name, ok, detail = "") => { checks.push({ name, ok }); console.log(`  ${ok ? "\x1b[32mPASS\x1b[0m" : "\x1b[31mFAIL\x1b[0m"}  ${name}${detail ? ` — ${detail}` : ""}`); };
@@ -45,25 +49,54 @@ function run() {
   execFileSync("node", [HUB, "trust", "add", "--trust-store", TS, "--device-id", "pro", "--name", "Pro", "--public-key", realPubKey(), "--roles", "agent"]).toString();
   const trustBefore = readFileSync(TS, "utf8");
 
-  // CHECK 1 — create the bundle.
-  const created = hub(["backup", "create", "--vault", DB, "--trust-store", TS, "--out", BUNDLE], `${PASS}\n`);
+  // Setup: hosted git repos (Phase 7) — one with a commit, one empty — plus a
+  // grant and a token, so the whole thing rides the backup bundle.
+  hub(["git", "init", "--git-root", GITROOT, "--name", "alpha"]);
+  hub(["git", "init", "--git-root", GITROOT, "--name", "empty"]);
+  hub(["git", "allow", "--git-root", GITROOT, "--name", "alpha", "--device", "pro", "--write"]);
+  const gitToken = hub(["git", "token", "--git-root", GITROOT, "--device", "pro"]).stdout.trim();
+  const WT = `${RUN}/wt`;
+  mkdirSync(WT, { recursive: true });
+  execFileSync("git", ["init", "-q", "-b", "main", WT]);
+  execFileSync("git", ["-C", WT, "config", "user.email", "t@t"]);
+  execFileSync("git", ["-C", WT, "config", "user.name", "t"]);
+  writeFileSync(`${WT}/README`, `${GITMARK}\n`);
+  execFileSync("git", ["-C", WT, "add", "-A"]);
+  execFileSync("git", ["-C", WT, "commit", "-qm", "c"]);
+  execFileSync("git", ["-C", WT, "push", "-q", `${GITROOT}/alpha.git`, "main:main"]);
+
+  // CHECK 1 — create the bundle (now including the hosted git repos).
+  const created = hub(["backup", "create", "--vault", DB, "--trust-store", TS, "--git-root", GITROOT, "--out", BUNDLE], `${PASS}\n`);
   check("backup create", created.status === 0 && existsSync(BUNDLE));
 
-  // CHECK 2 — the bundle is encrypted at rest.
+  // CHECK 2 — the bundle is encrypted at rest (hosted repo content included).
   const bundleBytes = readFileSync(BUNDLE);
-  check("bundle is encrypted (secret/passphrase/recovery absent)", [MARK, PASS, REC].every((s) => !bundleBytes.includes(Buffer.from(s, "utf8"))), `${bundleBytes.length} bytes`);
+  check("bundle is encrypted (secret/passphrase/recovery/git absent)", [MARK, PASS, REC, GITMARK].every((s) => !bundleBytes.includes(Buffer.from(s, "utf8"))), `${bundleBytes.length} bytes`);
 
   // Wipe everything — simulate clean hardware.
   for (const f of [DB, `${DB}-wal`, `${DB}-shm`, TS]) rmSync(f, { force: true });
-  check("state wiped", !existsSync(DB) && !existsSync(TS));
+  rmSync(GITROOT, { recursive: true, force: true });
+  check("state wiped", !existsSync(DB) && !existsSync(TS) && !existsSync(GITROOT));
 
   // CHECK 3 — wrong passphrase refuses to restore.
   const badRestore = hub(["backup", "restore", "--in", BUNDLE, "--vault", DB, "--trust-store", TS], `wrong passphrase here\n`);
   check("wrong passphrase refuses restore", badRestore.status === 1 && !existsSync(DB));
 
-  // CHECK 4 — restore with the correct passphrase.
-  const restored = hub(["backup", "restore", "--in", BUNDLE, "--vault", DB, "--trust-store", TS], `${PASS}\n`);
+  // CHECK 4 — restore with the correct passphrase (including hosted git repos).
+  const restored = hub(["backup", "restore", "--in", BUNDLE, "--vault", DB, "--trust-store", TS, "--git-root", GITROOT], `${PASS}\n`);
   check("restore succeeds", restored.status === 0 && existsSync(DB) && existsSync(TS));
+
+  // CHECK 4b — hosted git repos survived: the commit, the empty repo, and the
+  // per-device access (ACL + token hash) all come back.
+  {
+    const CLONE = `${RUN}/alpha-clone`;
+    execFileSync("git", ["clone", "-q", `${GITROOT}/alpha.git`, CLONE]);
+    check("hosted repo restored with its commit", existsSync(`${CLONE}/README`) && readFileSync(`${CLONE}/README`, "utf8").includes(GITMARK));
+    check("empty hosted repo restored (bare)", existsSync(`${GITROOT}/empty.git/HEAD`));
+    const rstore = new GitStore(GITROOT);
+    check("hosted repo ACL restored (pro has write on alpha)", rstore.canWrite("alpha", "pro"));
+    check("hosted git token survives backup", rstore.verifyToken("pro", gitToken));
+  }
 
   // CHECK 5 — the secret survived the snapshot + restore.
   check("secret intact after restore", vaultReveal() === MARK);

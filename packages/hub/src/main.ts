@@ -306,6 +306,7 @@ function runBackupCli(argv: string[]): void {
     vaultDb: req("--vault"),
     ...(flag(argv, "--trust-store") ? { trustStore: flag(argv, "--trust-store") as string } : {}),
     ...(flag(argv, "--cred-store") ? { credStore: flag(argv, "--cred-store") as string } : {}),
+    ...(flag(argv, "--git-root") ? { gitRoot: flag(argv, "--git-root") as string } : {}),
   });
   try {
     if (action === "create") {

@@ -30,8 +30,10 @@ Phase 4 milestone 1 makes the `supervisor` real: a **blue/green worker swap**
 that health-checks the new worker before retiring the old, with shells running
 untouched throughout (`tests/p4m1-swap.mjs`). Phase 5 milestone 1 adds a **chat
 provider**: a `chat` session kind that runs `etch -z` per message and rides the
-same session protocol as a terminal (`tests/p5m1-chat.mjs`). 116 checks across
-nine suites, all in CI. The xterm GUI bundles; the Tauri desktop
+same session protocol as a terminal (`tests/p5m1-chat.mjs`). Off-tailnet reach is
+a reverse-tunnel relay with **hub-key mutual auth + TLS channel binding** — a
+TLS-terminating MITM is refused even with the right pin (`tests/p2m3-relay.mjs`,
+`infra/lightsail/` for the VPS). 122 checks across ten suites, all in CI. The xterm GUI bundles; the Tauri desktop
 shell (`packages/desktop`) is scaffolded for a Mac build. `supervisor` is the
 only remaining skeleton.
 

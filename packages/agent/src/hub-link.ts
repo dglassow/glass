@@ -28,6 +28,8 @@ import {
   parseEnvelope,
   buildHandshakePayload,
   base64urlEncode,
+  randomNonce,
+  verifyHubAuth,
   DeviceId,
   SessionId,
   HUB,
@@ -51,6 +53,10 @@ export interface HubLinkOptions {
   readonly etch?: { present: boolean; version?: string };
   /** Signs the hub's auth challenge. Omit only when the hub runs in --open mode. */
   readonly signer?: Signer;
+  /** Pinned hub public key (mutual auth) — the hub must prove this identity, or we refuse. */
+  readonly hubKey?: string;
+  /** Accept a self-signed hub cert (dev/test only; identity still rests on hubKey). */
+  readonly insecureTls?: boolean;
   readonly onRegistered?: () => void;
   readonly onSessiondClosed?: () => void;
 }
@@ -229,11 +235,25 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
   // --- upstream: hub, with reconnect + re-hello ---
   function connectHub(): void {
     if (closed) return;
-    const ws = new WebSocket(opts.hubUrl);
+    const ws = opts.insecureTls ? new WebSocket(opts.hubUrl, { rejectUnauthorized: false }) : new WebSocket(opts.hubUrl);
     hub = ws;
 
     const reader = new FrameReader();
     let handshakeDone = false;
+    const clientNonce = randomNonce(); // for mutual auth (hub proves itself over this)
+
+    const sendProof = (nonce: string): void => {
+      const signer = opts.signer;
+      if (!signer) {
+        console.error("agent: hub requires device-key auth but no signer was provided (--key)");
+        ws.close();
+        return;
+      }
+      void (async () => {
+        const signature = base64urlEncode(await signer.sign(buildHandshakePayload(self, nonce)));
+        ws.send(JSON.stringify(makeEnvelope({ id: randomUUID(), ts: Date.now(), from: self, to: HUB, body: { type: "hello.proof", deviceId: DeviceId.parse(self), signature } })));
+      })();
+    };
 
     ws.on("open", () => {
       const helloBody: Body = {
@@ -244,6 +264,7 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
         protocolVersion: PROTOCOL_VERSION,
         appVersion: APP_VERSION,
         etch: opts.etch ?? { present: false },
+        ...(opts.hubKey ? { clientNonce, channelBinding: true } : {}),
       };
       ws.send(JSON.stringify(makeEnvelope({ id: randomUUID(), ts: Date.now(), from: self, to: HUB, body: helloBody })));
     });
@@ -257,27 +278,24 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
       const env = res.envelope;
       if (!handshakeDone) {
         if (env.body.type === "hello.challenge") {
-          const { nonce } = env.body;
-          const signer = opts.signer;
-          if (!signer) {
-            console.error("agent: hub requires device-key auth but no signer was provided (--key)");
-            ws.close();
+          const challenge = env.body;
+          if (opts.hubKey) {
+            // Mutual auth: the hub must prove its pinned identity, bound to this TLS channel.
+            const pinned = opts.hubKey;
+            const cb = spokeChannelBinding(ws);
+            void (async () => {
+              const hub = challenge.hub;
+              const ok = !!hub && hub.key === pinned && (await verifyHubAuth(pinned, self, clientNonce, challenge.nonce, cb, hub.signature));
+              if (!ok) {
+                console.error("agent: HUB IDENTITY VERIFICATION FAILED — refusing to connect");
+                ws.close(4010, "hub identity not verified");
+                return;
+              }
+              sendProof(challenge.nonce);
+            })();
             return;
           }
-          void (async () => {
-            const signature = base64urlEncode(await signer.sign(buildHandshakePayload(self, nonce)));
-            ws.send(
-              JSON.stringify(
-                makeEnvelope({
-                  id: randomUUID(),
-                  ts: Date.now(),
-                  from: self,
-                  to: HUB,
-                  body: { type: "hello.proof", deviceId: DeviceId.parse(self), signature },
-                }),
-              ),
-            );
-          })();
+          sendProof(challenge.nonce);
           return;
         }
         if (env.body.type === "hello.ack") {
@@ -334,5 +352,15 @@ function safeJson(text: string): unknown {
     return JSON.parse(text);
   } catch {
     return null;
+  }
+}
+
+/** TLS-exporter channel binding for a ws client's underlying socket, or "" (no TLS). */
+function spokeChannelBinding(ws: WebSocket): string {
+  const sock = (ws as unknown as { _socket?: { exportKeyingMaterial?: (len: number, label: string) => Buffer } })._socket;
+  try {
+    return sock?.exportKeyingMaterial ? base64urlEncode(new Uint8Array(sock.exportKeyingMaterial(32, "glass/cb/v1"))) : "";
+  } catch {
+    return "";
   }
 }

@@ -22,6 +22,8 @@
  * the authenticated identity, explicit errors instead of silent drops.
  */
 import { WebSocketServer, WebSocket, type RawData } from "ws";
+import { createServer as createHttpsServer, type Server as HttpsServer } from "node:https";
+import type { IncomingMessage } from "node:http";
 import { randomUUID } from "node:crypto";
 import {
   parseEnvelope,
@@ -30,6 +32,8 @@ import {
   verifyHandshakeProof,
   isValidPublicKey,
   randomNonce,
+  buildHubAuthPayload,
+  base64urlEncode,
   HUB,
   DeviceId,
   PROTOCOL_VERSION,
@@ -37,6 +41,7 @@ import {
   type Body,
   type DeviceRecord,
   type DeviceRole,
+  type Signer,
 } from "@glass/protocol";
 import type { TrustStore } from "./trust-store.js";
 import type { CredentialStore } from "./credential-store.js";
@@ -98,6 +103,10 @@ export interface HubServerOptions {
   registerToken?: string;
   /** Unlocked vault for machine secret retrieval (plan §9). */
   vault?: Vault;
+  /** TLS for the hub endpoint (PEM strings). Terminates in the hub; the relay only sees ciphertext. */
+  tls?: { cert: string; key: string };
+  /** Hub identity key (mutual auth). When set, the hub proves itself to spokes that send a clientNonce. */
+  hubSigner?: Signer;
 }
 
 function rawToString(raw: RawData): string {
@@ -121,7 +130,22 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
   const passkey = opts.passkey;
   let epochCounter = 0;
 
-  const wss = new WebSocketServer({ host, port: opts.port ?? 0, maxPayload: MAX_PAYLOAD_BYTES });
+  let httpsServer: HttpsServer | undefined;
+  const wss = opts.tls
+    ? new WebSocketServer({ server: (httpsServer = createHttpsServer({ cert: opts.tls.cert, key: opts.tls.key })), maxPayload: MAX_PAYLOAD_BYTES })
+    : new WebSocketServer({ host, port: opts.port ?? 0, maxPayload: MAX_PAYLOAD_BYTES });
+  if (httpsServer) httpsServer.listen(opts.port ?? 0, host);
+
+  /** TLS-exporter channel binding for this connection, or "" (no TLS / spoke opted out). */
+  function channelBinding(request: IncomingMessage, wants: boolean): string {
+    if (!wants) return "";
+    const sock = request.socket as unknown as { exportKeyingMaterial?: (len: number, label: string) => Buffer };
+    try {
+      return sock.exportKeyingMaterial ? base64urlEncode(new Uint8Array(sock.exportKeyingMaterial(32, "glass/cb/v1"))) : "";
+    } catch {
+      return "";
+    }
+  }
 
   function rawSend(socket: WebSocket, env: Envelope): void {
     if (socket.readyState !== WebSocket.OPEN) return;
@@ -183,7 +207,7 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
     return epoch;
   }
 
-  wss.on("connection", (socket) => {
+  wss.on("connection", (socket, request: IncomingMessage) => {
     let state: "first" | "await-proof" | "verifying" | "enroll-locked" | "cred-ceremony" | "credential-authed" | "registered" = "first";
     let deviceId: string | null = null;
     let epoch = -1;
@@ -239,7 +263,20 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
         name: trusted.name, roles: trusted.roles, appVersion: hello.appVersion, etchPresent: hello.etch.present,
       };
       state = "await-proof";
-      reply(socket, hello.deviceId, { type: "hello.challenge", nonce, alg: "ed25519" }, env.id);
+
+      // Mutual auth: if the spoke sent a clientNonce and we hold a hub key, prove
+      // our identity, bound to the TLS channel so a MITM relay can't forward it.
+      const clientNonce = hello.clientNonce;
+      const hubSigner = opts.hubSigner;
+      if (clientNonce && hubSigner) {
+        const cb = channelBinding(request, hello.channelBinding === true);
+        void (async () => {
+          const signature = base64urlEncode(await hubSigner.sign(buildHubAuthPayload(hello.deviceId, clientNonce, nonce, cb)));
+          reply(socket, hello.deviceId, { type: "hello.challenge", nonce, alg: "ed25519", hub: { key: hubSigner.publicKey, signature } }, env.id);
+        })();
+      } else {
+        reply(socket, hello.deviceId, { type: "hello.challenge", nonce, alg: "ed25519" }, env.id);
+      }
     }
 
     function handleProof(env: Envelope): void {
@@ -575,19 +612,20 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
   }, PING_INTERVAL_MS);
   pingTimer.unref();
 
+  const listenTarget = httpsServer ?? wss;
   return new Promise<HubServer>((resolve, reject) => {
-    wss.once("error", reject);
-    wss.once("listening", () => {
-      const addr = wss.address();
+    listenTarget.once("error", reject);
+    listenTarget.once("listening", () => {
+      const addr = (httpsServer ?? wss).address();
       const port = typeof addr === "object" && addr !== null ? addr.port : (opts.port ?? 0);
       resolve({
-        url: `ws://${host}:${port}`,
+        url: `${opts.tls ? "wss" : "ws"}://${host}:${port}`,
         deviceCount: () => registry.size,
         close: () =>
           new Promise<void>((res) => {
             clearInterval(pingTimer);
             for (const entry of registry.values()) entry.socket?.close();
-            wss.close(() => res());
+            wss.close(() => (httpsServer ? httpsServer.close(() => res()) : res()));
           }),
       });
     });

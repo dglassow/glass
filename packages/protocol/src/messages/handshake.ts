@@ -18,6 +18,10 @@ export const Hello = z.object({
   appVersion: z.string(),
   /** Present and at what version, or absent. Glass detects Etch, never manages it. */
   etch: z.object({ present: z.boolean(), version: z.string().optional() }),
+  /** A fresh spoke nonce; its presence asks the hub to prove its own identity (mutual auth). */
+  clientNonce: z.string().optional(),
+  /** The spoke can bind the hub proof to the TLS channel (Node clients; browsers cannot). */
+  channelBinding: z.boolean().optional(),
 });
 export type Hello = z.infer<typeof Hello>;
 
@@ -42,6 +46,15 @@ export const HelloChallenge = z.object({
   /** base64url of 32 CSPRNG bytes, valid only for this connection. */
   nonce: z.string(),
   alg: z.literal("ed25519"),
+  /** Hub's identity proof (mutual auth), present when the spoke sent a clientNonce. */
+  hub: z
+    .object({
+      /** base64url raw Ed25519 hub public key — the spoke checks it against its pin. */
+      key: z.string(),
+      /** signature over buildHubAuthPayload(deviceId, clientNonce, nonce, channelBinding). */
+      signature: z.string(),
+    })
+    .optional(),
 });
 export type HelloChallenge = z.infer<typeof HelloChallenge>;
 

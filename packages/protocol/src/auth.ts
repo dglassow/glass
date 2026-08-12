@@ -79,19 +79,41 @@ export async function signerFromPrivateKey(publicKey: string, privateKeyPkcs8: s
   };
 }
 
-/** Verify a handshake proof against a stored public key. Never throws. */
-export async function verifyHandshakeProof(
-  publicKey: string,
-  deviceId: string,
-  nonceB64: string,
-  signatureB64: string,
-): Promise<boolean> {
+/** Verify an Ed25519 signature over a payload against a raw public key. Never throws. */
+export async function verifySignature(publicKey: string, payload: Uint8Array, signatureB64: string): Promise<boolean> {
   try {
     const key = await crypto.subtle.importKey("raw", src(base64urlDecode(publicKey)), ALG, false, ["verify"]);
-    return await crypto.subtle.verify(ALG, key, src(base64urlDecode(signatureB64)), src(buildHandshakePayload(deviceId, nonceB64)));
+    return await crypto.subtle.verify(ALG, key, src(base64urlDecode(signatureB64)), src(payload));
   } catch {
     return false;
   }
+}
+
+/** Verify a device handshake proof against a stored public key. */
+export function verifyHandshakeProof(publicKey: string, deviceId: string, nonceB64: string, signatureB64: string): Promise<boolean> {
+  return verifySignature(publicKey, buildHandshakePayload(deviceId, nonceB64), signatureB64);
+}
+
+/**
+ * The hub's proof of its own identity (mutual auth). The hub signs this with its
+ * pinned key; the spoke verifies against the key it has pinned. The channel
+ * binding (a TLS exporter value) ties the proof to the exact TLS session, so a
+ * TLS-terminating relay/MITM — whose two legs export different values — cannot
+ * relay a genuine hub proof onward.
+ */
+export function buildHubAuthPayload(deviceId: string, clientNonce: string, hubNonce: string, channelBinding: string): Uint8Array {
+  return new TextEncoder().encode(`glass:hub-auth:v1\n${deviceId}\n${clientNonce}\n${hubNonce}\n${channelBinding}`);
+}
+
+export function verifyHubAuth(
+  hubPublicKey: string,
+  deviceId: string,
+  clientNonce: string,
+  hubNonce: string,
+  channelBinding: string,
+  signatureB64: string,
+): Promise<boolean> {
+  return verifySignature(hubPublicKey, buildHubAuthPayload(deviceId, clientNonce, hubNonce, channelBinding), signatureB64);
 }
 
 /** Validate that a base64url string decodes to a raw 32-byte Ed25519 public key. */

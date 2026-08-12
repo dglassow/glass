@@ -43,6 +43,8 @@ interface Args {
   name: string;
   key: string | null;
   supervised: boolean;
+  hubKey: string | null;
+  insecureTls: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -53,6 +55,8 @@ function parseArgs(argv: string[]): Args {
   let name = "";
   let key: string | null = null;
   let supervised = false;
+  let hubKey: string | null = null;
+  let insecureTls = false;
   for (let i = 0; i < argv.length; i++) {
     switch (argv[i]) {
       case "--sessiond": sessiond = argv[++i] ?? ""; break;
@@ -62,12 +66,14 @@ function parseArgs(argv: string[]): Args {
       case "--name": name = argv[++i] ?? ""; break;
       case "--key": key = argv[++i] ?? ""; break;
       case "--supervised": supervised = true; break;
+      case "--hub-key": hubKey = argv[++i] ?? ""; break;
+      case "--insecure-tls": insecureTls = true; break;
     }
   }
   if (!sessiond) throw new Error("usage: agent --sessiond <path> (--listen <sock> | --hub <url> --device-id <id> [--name <name>] [--key <path>] [--supervised])");
   if (!listen && !hub) throw new Error("agent needs at least one of --listen or --hub");
   if (hub && !deviceId) throw new Error("--hub requires --device-id");
-  return { sessiond, listen, hub, deviceId, name: name || deviceId, key, supervised };
+  return { sessiond, listen, hub, deviceId, name: name || deviceId, key, supervised, hubKey, insecureTls };
 }
 
 async function main(): Promise<void> {
@@ -94,6 +100,8 @@ async function main(): Promise<void> {
       deviceName: args.name,
       etch: detectEtch(),
       ...(signer ? { signer } : {}),
+      ...(args.hubKey ? { hubKey: args.hubKey } : {}),
+      ...(args.insecureTls ? { insecureTls: true } : {}),
       onRegistered: () => statusLine(args.supervised, "READY"),
       onSessiondClosed: () => {
         statusLine(args.supervised, "FAILED sessiond-closed");

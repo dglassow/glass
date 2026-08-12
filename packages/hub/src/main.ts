@@ -19,6 +19,8 @@ import { CredentialStore } from "./credential-store.js";
 import { Passkey } from "./passkey.js";
 import { Vault, VaultError } from "./vault/vault.js";
 import { createBundle, restoreBundle } from "./vault/backup.js";
+import { loadOrCreateHubSigner } from "./hub-key.js";
+import { TunnelKeeper } from "./tunnel.js";
 
 function flag(argv: string[], name: string): string | undefined {
   const i = argv.indexOf(name);
@@ -240,6 +242,19 @@ async function runServer(argv: string[]): Promise<void> {
     vaultConfig = { vault };
   }
 
+  // Optional TLS (terminates in the hub; the relay only sees ciphertext) + hub identity key.
+  const tlsCert = flag(argv, "--tls-cert");
+  const tlsKey = flag(argv, "--tls-key");
+  const hubKeyPath = flag(argv, "--hub-key");
+  let tlsConfig = {};
+  if (tlsCert && tlsKey) tlsConfig = { tls: { cert: readFileSync(tlsCert, "utf8"), key: readFileSync(tlsKey, "utf8") } };
+  let hubSignerConfig = {};
+  if (hubKeyPath) {
+    const hubSigner = await loadOrCreateHubSigner(hubKeyPath);
+    hubSignerConfig = { hubSigner };
+    console.error(`hub: identity key ${hubSigner.publicKey} (pin this on spokes)`);
+  }
+
   const hub = await startHubServer(
     open
       ? { host, port, mode: "open" }
@@ -251,6 +266,8 @@ async function runServer(argv: string[]): Promise<void> {
           ...(enrollTtl !== undefined ? { enrollTtlMs: Number(enrollTtl) } : {}),
           ...credentialConfig,
           ...vaultConfig,
+          ...tlsConfig,
+          ...hubSignerConfig,
         },
   );
   console.error(`hub: listening on ${hub.url} (pid ${process.pid}, ${open ? "OPEN — no auth" : "trust mode"})`);
@@ -292,11 +309,28 @@ function runBackupCli(argv: string[]): void {
   }
 }
 
+/** Reverse-tunnel keeper CLI: `hub tunnel -- <command> [args]`. */
+function runTunnelCli(argv: string[]): void {
+  const dd = argv.indexOf("--");
+  const cmd = dd < 0 ? [] : argv.slice(dd + 1);
+  if (cmd.length === 0) throw new Error("usage: hub tunnel -- <command> [args]");
+  const keeper = new TunnelKeeper({ command: cmd[0] as string, args: cmd.slice(1), onSpawn: (pid) => console.error(`tunnel: up (pid ${pid})`) });
+  keeper.start();
+  console.error("tunnel: keeper started");
+  const shutdown = (): void => {
+    keeper.stop();
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (argv[0] === "trust") await runTrustCli(argv.slice(1));
   else if (argv[0] === "vault") runVaultCli(argv.slice(1));
   else if (argv[0] === "backup") runBackupCli(argv.slice(1));
+  else if (argv[0] === "tunnel") runTunnelCli(argv.slice(1));
   else await runServer(argv);
 }
 

@@ -12,6 +12,7 @@
  */
 import { PROTOCOL_VERSION } from "@glass/protocol";
 
+export const TIER = "worker" as const;
 export const ROLE = "hub" as const;
 export const SPEAKS_PROTOCOL = PROTOCOL_VERSION;
 

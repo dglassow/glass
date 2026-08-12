@@ -31,6 +31,7 @@ const DEFAULT_MAX_BYTES = 1024 * 1024; // 1 MiB of scrollback per session
 
 export class PtySession {
   readonly id: SessionId;
+  readonly kind = "pty" as const;
   readonly deviceId: DeviceId;
   readonly title: string;
   readonly createdAt: number;

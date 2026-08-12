@@ -44,7 +44,15 @@ capability. Proven by `tests/p2m2-passkey.mjs`. Browser-side wiring
 ## Phase 5 — Chat and voice
 
 ### Q3 — Does Etch have a programmatic mode with structured output?
-**Find out.** *(Deferred — Phase 5, nothing before it depends on this.)*
+**Resolved (Phase 5 M1).** Three modes exist: (1) `etch -z "prompt"` one-shot
+prints ONLY the final assistant text (usable now, not JSON); (2) `tui_gateway`
+newline-delimited JSON-RPC over stdio (structured, but a full UI-backend
+protocol); (3) `etch acp` (structured, but editor/agent-client oriented). The
+chat provider uses mode 1 now — subprocess per message, render the text. The
+structured JSON-RPC/ACP integration (session ids, tool calls, cost, streaming)
+is a later enhancement if the chat surface needs those fields.
+
+Original note follows for context:
 
 Interactive Etch needs nothing from Glass; it's a program in a PTY. But the PWA chat has to invoke Etch, get something parseable back, and render it conversationally.
 

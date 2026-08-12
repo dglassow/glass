@@ -8,9 +8,22 @@
  * blue/green-swapped) by the supervisor; runnable by hand and for the tests.
  */
 import { writeSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { startAgent } from "./relay.js";
 import { startHubLink } from "./hub-link.js";
 import { loadOrCreateSigner } from "./keystore.js";
+
+/** Detect the Etch CLI (detected, never managed — plan §0). */
+function detectEtch(): { present: boolean; version?: string } {
+  try {
+    const r = spawnSync(process.env["GLASS_ETCH_BIN"] || "etch", ["--version"], { encoding: "utf8", timeout: 5000 });
+    if (r.error) return { present: false };
+    const line = (r.stdout || r.stderr || "").trim().split("\n")[0]?.trim();
+    return line ? { present: true, version: line } : { present: true };
+  } catch {
+    return { present: false };
+  }
+}
 
 /** Report supervised-worker status on fd 3 (a pipe the supervisor reads). Best-effort. */
 function statusLine(supervised: boolean, line: string): void {
@@ -79,6 +92,7 @@ async function main(): Promise<void> {
       hubUrl: args.hub,
       deviceId: args.deviceId,
       deviceName: args.name,
+      etch: detectEtch(),
       ...(signer ? { signer } : {}),
       onRegistered: () => statusLine(args.supervised, "READY"),
       onSessiondClosed: () => {

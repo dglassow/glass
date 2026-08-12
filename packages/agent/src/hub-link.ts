@@ -47,6 +47,8 @@ export interface HubLinkOptions {
   readonly hubUrl: string;
   readonly deviceId: string;
   readonly deviceName: string;
+  /** Etch presence, reported in the device record (detected, never managed). */
+  readonly etch?: { present: boolean; version?: string };
   /** Signs the hub's auth challenge. Omit only when the hub runs in --open mode. */
   readonly signer?: Signer;
   readonly onRegistered?: () => void;
@@ -241,7 +243,7 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
         roles: ["agent"] as DeviceRole[],
         protocolVersion: PROTOCOL_VERSION,
         appVersion: APP_VERSION,
-        etch: { present: false },
+        etch: opts.etch ?? { present: false },
       };
       ws.send(JSON.stringify(makeEnvelope({ id: randomUUID(), ts: Date.now(), from: self, to: HUB, body: helloBody })));
     });

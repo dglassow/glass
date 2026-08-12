@@ -28,8 +28,10 @@ Phase 3 milestone 1 adds an encrypted **vault**: envelope encryption over
 encrypted **backup bundle** that survives the wipe-and-restore recovery drill.
 Phase 4 milestone 1 makes the `supervisor` real: a **blue/green worker swap**
 that health-checks the new worker before retiring the old, with shells running
-untouched throughout (`tests/p4m1-swap.mjs`). 111 checks across eight suites, all
-in CI. The xterm GUI bundles; the Tauri desktop
+untouched throughout (`tests/p4m1-swap.mjs`). Phase 5 milestone 1 adds a **chat
+provider**: a `chat` session kind that runs `etch -z` per message and rides the
+same session protocol as a terminal (`tests/p5m1-chat.mjs`). 116 checks across
+nine suites, all in CI. The xterm GUI bundles; the Tauri desktop
 shell (`packages/desktop`) is scaffolded for a Mac build. `supervisor` is the
 only remaining skeleton.
 

@@ -19,6 +19,8 @@ import {
   type SessionRecord,
 } from "@glass/protocol";
 import { PtySession } from "./pty.js";
+import { ChatSession } from "./chat.js";
+import type { Session } from "./session.js";
 
 const SELF = "sessiond";
 
@@ -39,7 +41,7 @@ export interface SessiondServer {
 }
 
 export function createSessiondServer(opts?: { maxBytesPerSession?: number }): SessiondServer {
-  const sessions = new Map<string, PtySession>();
+  const sessions = new Map<string, Session>();
   const conns = new Set<Conn>();
   const maxBytes = opts?.maxBytesPerSession;
 
@@ -52,10 +54,10 @@ export function createSessiondServer(opts?: { maxBytesPerSession?: number }): Se
     conn.socket.write(encodeFrame(env));
   }
 
-  function toRecord(s: PtySession): SessionRecord {
+  function toRecord(s: Session): SessionRecord {
     return {
       id: s.id,
-      kind: "pty",
+      kind: s.kind,
       deviceId: s.deviceId,
       title: s.title,
       createdAt: s.createdAt,
@@ -63,7 +65,7 @@ export function createSessiondServer(opts?: { maxBytesPerSession?: number }): Se
     };
   }
 
-  function attach(conn: Conn, session: PtySession): void {
+  function attach(conn: Conn, session: Session): void {
     const existing = conn.subs.get(session.id);
     if (existing) {
       existing();
@@ -103,13 +105,16 @@ export function createSessiondServer(opts?: { maxBytesPerSession?: number }): Se
     const body = env.body;
     switch (body.type) {
       case "session.create": {
-        const session = new PtySession({
-          deviceId: body.deviceId,
-          cols: body.cols,
-          rows: body.rows,
-          ...(body.cwd !== undefined ? { cwd: body.cwd } : {}),
-          ...(maxBytes !== undefined ? { maxBytes } : {}),
-        });
+        const session: Session =
+          body.kind === "chat"
+            ? new ChatSession({ deviceId: body.deviceId, ...(maxBytes !== undefined ? { maxBytes } : {}) })
+            : new PtySession({
+                deviceId: body.deviceId,
+                cols: body.cols,
+                rows: body.rows,
+                ...(body.cwd !== undefined ? { cwd: body.cwd } : {}),
+                ...(maxBytes !== undefined ? { maxBytes } : {}),
+              });
         sessions.set(session.id, session);
         attach(conn, session); // creator is implicitly attached, like opening a terminal
         send(conn, { type: "session.created", session: toRecord(session) }, env.id);

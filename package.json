@@ -8,7 +8,7 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b",
-    "test": "node tests/m1-acceptance.mjs && node tests/m2-acceptance.mjs && node tests/m3-viewer.mjs && node tests/p2m1-auth.mjs && node tests/p2m2-passkey.mjs && node tests/p2m3-relay.mjs && node tests/p3m1-vault.mjs && node tests/p3m2-backup.mjs && node tests/p4m1-swap.mjs && node tests/p4m2-update.mjs && node tests/p5m1-chat.mjs",
+    "test": "node tests/m1-acceptance.mjs && node tests/m2-acceptance.mjs && node tests/m3-viewer.mjs && node tests/p2m1-auth.mjs && node tests/p2m2-passkey.mjs && node tests/p2m3-relay.mjs && node tests/p3m1-vault.mjs && node tests/p3m2-backup.mjs && node tests/p4m1-swap.mjs && node tests/p4m2-update.mjs && node tests/p5m1-chat.mjs && node tests/p7m1-git.mjs",
     "clean": "tsc -b --clean && rm -rf packages/*/dist packages/*/*.tsbuildinfo"
   },
   "devDependencies": {

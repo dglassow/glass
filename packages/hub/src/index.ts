@@ -27,3 +27,4 @@ export {
   type UpdateDecision,
   type StageResult,
 } from "./updater/index.js";
+export { GitStore, GitStoreError, createGitHttpHandler, type GitHttpHandler } from "./git/index.js";

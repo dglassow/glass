@@ -47,6 +47,8 @@ import type { TrustStore } from "./trust-store.js";
 import type { CredentialStore } from "./credential-store.js";
 import { Passkey, responseCredentialId } from "./passkey.js";
 import type { Vault } from "./vault/vault.js";
+import type { GitStore } from "./git/git-store.js";
+import { createGitHttpHandler } from "./git/git-http.js";
 
 const APP_VERSION = "0.0.0";
 const HANDSHAKE_TIMEOUT_MS = 5000;
@@ -107,6 +109,8 @@ export interface HubServerOptions {
   tls?: { cert: string; key: string };
   /** Hub identity key (mutual auth). When set, the hub proves itself to spokes that send a clientNonce. */
   hubSigner?: Signer;
+  /** Git hosting for spokes (plan §13/Phase 7). Served over the same TLS listener under /git/. */
+  gitStore?: GitStore;
 }
 
 function rawToString(raw: RawData): string {
@@ -134,6 +138,18 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
   const wss = opts.tls
     ? new WebSocketServer({ server: (httpsServer = createHttpsServer({ cert: opts.tls.cert, key: opts.tls.key })), maxPayload: MAX_PAYLOAD_BYTES })
     : new WebSocketServer({ host, port: opts.port ?? 0, maxPayload: MAX_PAYLOAD_BYTES });
+  // Git hosting (Phase 7) shares the TLS listener under /git/. Only plain HTTP
+  // requests reach 'request' (WS upgrades are handled separately), so anything
+  // not handled by the git route is a 404. Auth + ACL live in the handler.
+  if (httpsServer && opts.gitStore) {
+    const gitHandler = createGitHttpHandler(opts.gitStore);
+    httpsServer.on("request", (req, res) => {
+      if (!gitHandler(req, res)) {
+        res.writeHead(404, { "content-type": "text/plain" });
+        res.end("not found");
+      }
+    });
+  }
   if (httpsServer) httpsServer.listen(opts.port ?? 0, host);
 
   /** TLS-exporter channel binding for this connection, or "" (no TLS / spoke opted out). */

@@ -22,6 +22,7 @@ import { createBundle, restoreBundle } from "./vault/backup.js";
 import { loadOrCreateHubSigner } from "./hub-key.js";
 import { TunnelKeeper } from "./tunnel.js";
 import { Updater, requestSwap } from "./updater/index.js";
+import { GitStore } from "./git/git-store.js";
 
 function flag(argv: string[], name: string): string | undefined {
   const i = argv.indexOf(name);
@@ -256,6 +257,16 @@ async function runServer(argv: string[]): Promise<void> {
     console.error(`hub: identity key ${hubSigner.publicKey} (pin this on spokes)`);
   }
 
+  // Optional git hosting (plan §13/Phase 7). Served only over the TLS listener
+  // (the tunnel), and only with device auth — never in --open mode.
+  const gitRoot = flag(argv, "--git-root");
+  let gitConfig = {};
+  if (gitRoot) {
+    if (open) throw new Error("--git-root cannot be combined with --open (git hosting requires device auth)");
+    if (!(tlsCert && tlsKey)) throw new Error("--git-root requires TLS (--tls-cert/--tls-key); git is served only over the TLS listener");
+    gitConfig = { gitStore: new GitStore(gitRoot) };
+  }
+
   const hub = await startHubServer(
     open
       ? { host, port, mode: "open" }
@@ -269,8 +280,10 @@ async function runServer(argv: string[]): Promise<void> {
           ...vaultConfig,
           ...tlsConfig,
           ...hubSignerConfig,
+          ...gitConfig,
         },
   );
+  if (gitRoot) console.error(`hub: git hosting enabled from ${gitRoot} (served under /git/)`);
   console.error(`hub: listening on ${hub.url} (pid ${process.pid}, ${open ? "OPEN — no auth" : "trust mode"})`);
   if (credStorePath) console.error(`hub: passkey bootstrap enabled (rpID=${rpID})`);
   if (open) console.error("hub: WARNING running in --open mode; device-key auth is disabled");
@@ -387,6 +400,54 @@ async function runUpdateCli(argv: string[]): Promise<void> {
   }
 }
 
+/**
+ * Git hosting management CLI (plan §13/Phase 7).
+ *   hub git init   --git-root <dir> --name <repo>
+ *   hub git allow  --git-root <dir> --name <repo> --device <id> [--write]
+ *   hub git revoke --git-root <dir> --name <repo> --device <id>
+ *   hub git list   --git-root <dir>
+ *   hub git token  --git-root <dir> --device <id>     # prints the bearer token ONCE
+ */
+function runGitCli(argv: string[]): void {
+  const action = argv[0];
+  const root = flag(argv, "--git-root");
+  if (!root) throw new Error("git: --git-root <dir> is required");
+  const store = new GitStore(root);
+  const req = (name: string): string => {
+    const v = flag(argv, name);
+    if (!v) throw new Error(`git: ${name} is required`);
+    return v;
+  };
+  try {
+    if (action === "init") {
+      const name = req("--name");
+      store.initRepo(name);
+      process.stderr.write(`git: initialized ${name}\n`);
+    } else if (action === "allow") {
+      const name = req("--name");
+      const device = req("--device");
+      const write = argv.includes("--write");
+      store.allow(name, device, write);
+      process.stderr.write(`git: ${device} granted ${write ? "write" : "read"} on ${name}\n`);
+    } else if (action === "revoke") {
+      store.revoke(req("--name"), req("--device"));
+      process.stderr.write(`git: revoked ${req("--device")} on ${req("--name")}\n`);
+    } else if (action === "list") {
+      process.stdout.write(JSON.stringify(store.listRepos(), null, 2) + "\n");
+    } else if (action === "token") {
+      const device = req("--device");
+      const token = store.mintToken(device);
+      process.stdout.write(token + "\n"); // shown ONCE; store in the device's config
+      process.stderr.write(`git: minted token for ${device} (shown once — not recoverable)\n`);
+    } else {
+      throw new Error(`git: unknown action "${action ?? ""}" (expected init | allow | revoke | list | token)`);
+    }
+  } catch (err) {
+    process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
+    process.exit(1);
+  }
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (argv[0] === "trust") await runTrustCli(argv.slice(1));
@@ -394,6 +455,7 @@ async function main(): Promise<void> {
   else if (argv[0] === "backup") runBackupCli(argv.slice(1));
   else if (argv[0] === "tunnel") runTunnelCli(argv.slice(1));
   else if (argv[0] === "update") await runUpdateCli(argv.slice(1));
+  else if (argv[0] === "git") runGitCli(argv.slice(1));
   else await runServer(argv);
 }
 

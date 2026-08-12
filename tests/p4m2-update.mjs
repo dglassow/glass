@@ -357,6 +357,21 @@ exit 0
   check("redteam#5b: export-ignore file is still present in the staged tree", existsSync(join(s.stagingDir, "packages/hub/dist/extra.js")));
 }
 
+// #6 CRITICAL (confirmation red-team): a hostile .git/config must not achieve
+// code execution during fetch()/checkForUpdate(). Every git call (not just
+// verify-tag) must pin the dangerous config keys.
+{
+  const r = newRepo();
+  commitRelease(r, { version: "1.1.0" });
+  signTag(r, "v1.1.0");
+  const marker = join(ROOT, `pwned-sshcmd-${repoN}`);
+  r.g("remote", "add", "origin", "ssh://git@example.invalid/repo.git");
+  r.g("config", "core.sshCommand", `touch ${marker}; false`);
+  const d = updater(r.dir).checkForUpdate(); // calls fetch('origin') first
+  check("redteam#6: hostile core.sshCommand does not run during fetch", !existsSync(marker));
+  check("redteam#6: gate still applies the verified release", d.action === "apply" && d.tag === "v1.1.0");
+}
+
 rmSync(ROOT, { recursive: true, force: true });
 
 const passed = checks.filter((c) => c.ok).length;

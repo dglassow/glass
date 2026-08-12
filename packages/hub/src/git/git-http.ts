@@ -102,6 +102,12 @@ export function createGitHttpHandler(store: GitStore): GitHttpHandler {
       return true;
     }
 
+    // Reconstruct QUERY_STRING from the service WE classified + authorized, not
+    // the raw query. Otherwise `?service=git-upload-pack&service=git-receive-pack`
+    // classifies as read (first value) while git-http-backend runs the last —
+    // handing a read-only device the write-gated receive-pack advertisement.
+    const queryString = parsed.rest === "info/refs" ? `service=git-${parsed.write ? "receive" : "upload"}-pack` : "";
+
     // Delegate to git-http-backend as a CGI. Environment is explicit.
     const env: NodeJS.ProcessEnv = {
       PATH: process.env.PATH,
@@ -109,7 +115,7 @@ export function createGitHttpHandler(store: GitStore): GitHttpHandler {
       GIT_HTTP_EXPORT_ALL: "1", // ACL already enforced above
       REQUEST_METHOD: req.method,
       PATH_INFO: `/${parsed.repo}.git/${parsed.rest}`,
-      QUERY_STRING: url.search.slice(1),
+      QUERY_STRING: queryString,
       CONTENT_TYPE: req.headers["content-type"] ?? "",
       REMOTE_USER: deviceId,
       REMOTE_ADDR: req.socket.remoteAddress ?? "",

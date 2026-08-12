@@ -72,6 +72,26 @@ export function hardenedGitEnv(): NodeJS.ProcessEnv {
   };
 }
 
+/**
+ * -c pins applied to EVERY git call against an untrusted repo. The repo's own
+ * .git/config is always read (env can't disable it), and command-line -c
+ * outranks it — so this neutralizes the config keys that turn a plain
+ * fetch/ls-tree/rev-parse into code execution: ssh transport (core.sshCommand),
+ * credential/fsmonitor/proxy helper commands, hooks, and the ext:: transport.
+ * Without this, an attacker who can write .git/config gets RCE during fetch(),
+ * before any signature verification runs.
+ */
+export const HARDENED_GIT_CONFIG: string[] = [
+  "-c", "core.sshCommand=false",
+  "-c", "credential.helper=",
+  "-c", "core.fsmonitor=",
+  "-c", "core.gitproxy=",
+  "-c", "core.hooksPath=/dev/null",
+  "-c", "protocol.ext.allow=never",
+  "-c", "core.pager=cat",
+  "-c", "uploadpack.packObjectsHook=",
+];
+
 function isInside(child: string, parent: string): boolean {
   const c = resolve(child);
   const p = resolve(parent);
@@ -105,6 +125,7 @@ export function verifyTagSignature(repoDir: string, ref: string, allowedSignersP
     [
       "-C",
       repoDir,
+      ...HARDENED_GIT_CONFIG,
       // Command-line -c outranks every config file, so a repo-local
       // gpg.ssh.program / gpg.format / allowedSignersFile cannot override these.
       "-c",

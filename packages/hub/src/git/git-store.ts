@@ -11,7 +11,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
-import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 
 const REPO_NAME_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$/;
 
@@ -128,11 +128,20 @@ export class GitStore {
     return !!acl && acl.write.includes(deviceId);
   }
 
+  // Tokens are 256-bit random, so a slow KDF is unnecessary (nothing to
+  // brute-force) and scrypt-on-the-event-loop is an auth-path DoS. A salted
+  // SHA-256 is both sufficient and non-blocking.
+  private static hashToken(token: string, salt: Buffer): Buffer {
+    return createHash("sha256").update(salt).update(Buffer.from(token, "utf8")).digest();
+  }
+  private static readonly DUMMY_SALT = Buffer.alloc(16);
+  private static readonly DUMMY_HASH = Buffer.alloc(32);
+
   /** Mint a fresh token for a device; returns the plaintext ONCE. */
   mintToken(deviceId: string): string {
     const token = randomBytes(32).toString("base64url");
     const salt = randomBytes(16);
-    const hash = scryptSync(token, salt, 32);
+    const hash = GitStore.hashToken(token, salt);
     this.acl.tokens[deviceId] = { salt: salt.toString("base64"), hash: hash.toString("base64") };
     this.save();
     return token;
@@ -140,14 +149,17 @@ export class GitStore {
 
   verifyToken(deviceId: string, token: string): boolean {
     const rec = this.acl.tokens[deviceId];
-    if (!rec) return false;
+    // Always hash (dummy salt/expected for an unknown device) so response time
+    // doesn't reveal whether the device id is provisioned.
+    const salt = rec ? Buffer.from(rec.salt, "base64") : GitStore.DUMMY_SALT;
+    const expected = rec ? Buffer.from(rec.hash, "base64") : GitStore.DUMMY_HASH;
+    let match = false;
     try {
-      const salt = Buffer.from(rec.salt, "base64");
-      const expected = Buffer.from(rec.hash, "base64");
-      const actual = scryptSync(token, salt, expected.length);
-      return actual.length === expected.length && timingSafeEqual(actual, expected);
+      const actual = GitStore.hashToken(token, salt);
+      match = actual.length === expected.length && timingSafeEqual(actual, expected);
     } catch {
-      return false;
+      match = false;
     }
+    return rec ? match : false;
   }
 }

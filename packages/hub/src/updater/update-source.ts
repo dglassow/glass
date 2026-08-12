@@ -19,7 +19,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { resolve, dirname, sep, isAbsolute } from "node:path";
 import { parseSemVer, compareSemVer, type SemVer } from "./semver.js";
-import { verifyTagSignature, hardenedGitEnv, type VerifyResult, UpdateVerifyError } from "./verify.js";
+import { verifyTagSignature, hardenedGitEnv, HARDENED_GIT_CONFIG, type VerifyResult, UpdateVerifyError } from "./verify.js";
 
 export interface ReleaseManifest {
   version: string;
@@ -50,7 +50,7 @@ export class GitUpdateSource {
   }
 
   private git(args: string[], opts: { encoding?: "utf8" | "buffer" } = {}): { status: number; stdout: string; stderr: string } {
-    const res = spawnSync("git", ["-C", this.repoDir, ...args], {
+    const res = spawnSync("git", ["-C", this.repoDir, ...HARDENED_GIT_CONFIG, ...args], {
       encoding: "utf8",
       env: hardenedGitEnv(),
       maxBuffer: 512 * 1024 * 1024,
@@ -60,7 +60,7 @@ export class GitUpdateSource {
   }
 
   private gitBuffer(args: string[]): { status: number; stdout: Buffer; stderr: string } {
-    const res = spawnSync("git", ["-C", this.repoDir, ...args], { env: hardenedGitEnv(), maxBuffer: 512 * 1024 * 1024 });
+    const res = spawnSync("git", ["-C", this.repoDir, ...HARDENED_GIT_CONFIG, ...args], { env: hardenedGitEnv(), maxBuffer: 512 * 1024 * 1024 });
     return { status: res.status ?? -1, stdout: (res.stdout as Buffer) ?? Buffer.alloc(0), stderr: res.stderr?.toString() ?? "" };
   }
 

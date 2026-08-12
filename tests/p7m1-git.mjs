@@ -168,6 +168,12 @@ check("path: dumb file path (HEAD) is 404, not served", (await curlCode("/git/pr
 check("path: loose-object path is 404, not served", (await curlCode("/git/proj.git/objects/info/packs")) === "404");
 check("path: encoded traversal is refused (4xx)", /^4\d\d$/.test(await curlCode("/git/..%2f..%2fetc.git/info/refs?service=git-upload-pack")));
 check("path: receive-pack advertise needs write (read-only device 403)", (await curlCode("/git/proj.git/info/refs?service=git-receive-pack", "pro", tok.pro)) === "403");
+// Service-param desync: a read-only device sending both services must NOT reach
+// the write-gated receive-pack advertise (classifier and backend must agree).
+{
+  const { stdout } = await pexec("curl", ["-s", "-u", `pro:${tok.pro}`, `http://127.0.0.1:${port}/git/proj.git/info/refs?service=git-upload-pack&service=git-receive-pack`], { timeout: 8000 });
+  check("acl: service-param desync serves upload-pack, not receive-pack", stdout.includes("# service=git-upload-pack") && !stdout.includes("service=git-receive-pack"));
+}
 
 // End-to-end through the REAL hub server: git hosting attached to the hub's TLS
 // listener (the production path), served alongside the WS endpoint.

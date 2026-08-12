@@ -58,7 +58,7 @@ export function showOnboarding(app: HTMLElement, opts: OnboardingOptions): void 
   panel.className = "onboard-panel";
 
   const title = document.createElement("h1");
-  title.textContent = "glass";
+  title.textContent = "Glass";
 
   const narrative = document.createElement("p");
   narrative.className = "onboard-narrative";

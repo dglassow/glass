@@ -4,9 +4,10 @@
   --line: #1c2230;
   --fg: #bfbdb6;
   --muted: #6c7380;
-  --accent: #e6b450;
+  --accent: #4d9fff;
+  --accent-2: #38bdf8;
   --ok: #7fd962;
-  --wait: #e6b450;
+  --wait: #6fb2ff;
   --err: #f07178;
   --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 }

@@ -186,7 +186,7 @@ function showSpokeScreen(app: HTMLElement, identity: DeviceIdentity, reloadAfter
   panel.className = "connect-panel";
 
   const title = document.createElement("h1");
-  title.textContent = "glass";
+  title.textContent = "Glass";
   const subtitle = document.createElement("p");
   subtitle.className = "connect-subtitle";
   subtitle.textContent = "spoke — join an existing hub";

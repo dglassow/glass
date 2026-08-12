@@ -1,0 +1,18 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Secrets and instance config never belong in this repo.
+# All of it lives in the backup bundle instead.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.mobileprovision
+glass.config.json
+/config/local/
+
+.DS_Store
+*.log
+logs/

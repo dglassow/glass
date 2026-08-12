@@ -121,6 +121,25 @@ fn spawn_backend(
         for (key, value) in envs {
             cmd.env(key, value);
         }
+        // Critical: give the backend (and its own `node`/shell/git children) a
+        // usable PATH. A GUI-launched app has a minimal PATH lacking Homebrew,
+        // so the launcher's internal `spawn("node", …)` would ENOENT. Prepend
+        // the resolved node's directory + the common bins.
+        let mut path = String::new();
+        if let Some(dir) = Path::new(node).parent() {
+            if !dir.as_os_str().is_empty() {
+                path.push_str(&dir.to_string_lossy());
+                path.push(':');
+            }
+        }
+        path.push_str("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+        if let Ok(existing) = std::env::var("PATH") {
+            if !existing.is_empty() {
+                path.push(':');
+                path.push_str(&existing);
+            }
+        }
+        cmd.env("PATH", path);
         match cmd.spawn() {
             Ok(child) => return Ok(child),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

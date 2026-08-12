@@ -38,9 +38,12 @@ const roleArg = (() => {
 })();
 
 const b64u = (b) => Buffer.from(b).toString("base64url");
+// The exact node binary running this launcher — robust against a minimal PATH
+// (a GUI-launched desktop app), unlike a bare "node".
+const NODE = process.execPath;
 const procs = [];
 function spawnProc(name, args, readyRe, timeoutMs = 12000) {
-  const cp = spawn("node", args, { stdio: ["ignore", "pipe", "pipe"] });
+  const cp = spawn(NODE, args, { stdio: ["ignore", "pipe", "pipe"] });
   procs.push({ name, cp });
   let buf = "";
   const ready = new Promise((resolve, reject) => {
@@ -57,14 +60,14 @@ function spawnProc(name, args, readyRe, timeoutMs = 12000) {
   return { cp, ready, out: () => buf };
 }
 async function genKeyIfMissing(deviceId, path) {
-  if (existsSync(path)) return JSON.parse(readFileSync(path, "utf8")).publicKey;
+  if (existsSync(path)) return JSON.parse(readFileSync(path, "utf8")).publicKey; // was execFileSync("cat")
   const kp = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
   const publicKey = b64u(new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey)));
   const privateKeyPkcs8 = b64u(new Uint8Array(await crypto.subtle.exportKey("pkcs8", kp.privateKey)));
   writeFileSync(path, JSON.stringify({ v: 1, deviceId, publicKey, privateKeyPkcs8 }), { mode: 0o600 });
   return publicKey;
 }
-const trustAdd = (ts, id, pub, roles) => execFileSync("node", [HUB, "trust", "add", "--trust-store", ts, "--device-id", id, "--name", id, "--public-key", pub, "--roles", roles]);
+const trustAdd = (ts, id, pub, roles) => execFileSync(NODE, [HUB, "trust", "add", "--trust-store", ts, "--device-id", id, "--name", id, "--public-key", pub, "--roles", roles]);
 const ready = (obj) => console.log(`GLASS_BACKEND_READY ${JSON.stringify(obj)}`);
 const shutdown = () => {
   for (const { cp } of procs.reverse()) try { cp.kill("SIGTERM"); } catch { /* gone */ }

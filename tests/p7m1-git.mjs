@@ -152,6 +152,23 @@ check("tokens: unknown device rejected", store.verifyToken("ghost", tok.studio) 
   check("path: traversal / non-repo path refused", !r.ok);
 }
 
+// A valid token grants NO access to a repo the device isn't ACL'd for (a token
+// authenticates a device; it is not a blanket grant across repos).
+{
+  store.initRepo("secret"); // studio has no grant on 'secret'
+  const r = await git(["ls-remote", `${base("studio", tok.studio)}/secret.git`]);
+  check("acl: valid token gives no access to an un-granted repo (403)", !r.ok && /403|forbidden|no read/i.test(r.out));
+}
+// Deeper path probes via curl (exact status codes).
+async function curlCode(path, user = "studio", pass = tok.studio) {
+  const { stdout } = await pexec("curl", ["-s", "-o", "/dev/null", "-w", "%{http_code}", "-u", `${user}:${pass}`, `http://127.0.0.1:${port}${path}`], { timeout: 8000 });
+  return stdout.trim();
+}
+check("path: dumb file path (HEAD) is 404, not served", (await curlCode("/git/proj.git/HEAD")) === "404");
+check("path: loose-object path is 404, not served", (await curlCode("/git/proj.git/objects/info/packs")) === "404");
+check("path: encoded traversal is refused (4xx)", /^4\d\d$/.test(await curlCode("/git/..%2f..%2fetc.git/info/refs?service=git-upload-pack")));
+check("path: receive-pack advertise needs write (read-only device 403)", (await curlCode("/git/proj.git/info/refs?service=git-receive-pack", "pro", tok.pro)) === "403");
+
 // End-to-end through the REAL hub server: git hosting attached to the hub's TLS
 // listener (the production path), served alongside the WS endpoint.
 {

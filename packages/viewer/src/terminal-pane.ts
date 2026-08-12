@@ -59,6 +59,25 @@ export class TerminalPane {
     applyBackgroundLayer(this.bg, settings);
     this.refit();
 
+    // xterm keeps its OWN selection (not the DOM selection), so the native Edit
+    // menu's Copy can't see it — wire Cmd+C (copy selection) / Cmd+V (paste)
+    // here. Cmd, not Ctrl, so Ctrl+C still sends SIGINT to the shell.
+    this.term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== "keydown" || !e.metaKey || e.ctrlKey || e.altKey) return true;
+      const k = e.key.toLowerCase();
+      if (k === "c" && this.term.hasSelection()) {
+        void navigator.clipboard.writeText(this.term.getSelection());
+        return false;
+      }
+      if (k === "v") {
+        void navigator.clipboard.readText().then((t) => {
+          if (t) this.client.input(this.agentId, this.sessionId, t);
+        });
+        return false;
+      }
+      return true;
+    });
+
     this.term.onData((data) => this.client.input(this.agentId, this.sessionId, data));
     this.term.onResize(({ cols, rows }) => this.client.resize(this.agentId, this.sessionId, cols, rows));
     window.addEventListener("resize", this.onWindowResize);

@@ -167,18 +167,12 @@ fn start_backend_blocking(
         return Err("spoke role needs hubUrl (the remote hub to join)".into());
     }
 
-    let glass_home = std::env::var("GLASS_HOME").map_err(|_| {
-        "GLASS_HOME is not set — export GLASS_HOME=<path to the glass repo root> \
-         before launching the Glass desktop app"
+    let glass_home = resolve_glass_home().ok_or_else(|| {
+        "could not locate the Glass backend (deploy/glass-backend.mjs). Set GLASS_HOME to \
+         the repo root, or keep the repo at ~/projects/glass."
             .to_string()
     })?;
     let script = Path::new(&glass_home).join("deploy").join("glass-backend.mjs");
-    if !script.is_file() {
-        return Err(format!(
-            "backend launcher not found at {} — is GLASS_HOME pointing at the glass repo root?",
-            script.display()
-        ));
-    }
 
     // One backend at a time: reconfiguring replaces the previous role cleanly.
     kill_backend(&shared);
@@ -402,6 +396,35 @@ fn app_version() -> String {
 // App wiring: menu + lifecycle
 // ---------------------------------------------------------------------------
 
+/// Locate the Glass repo root (which holds deploy/glass-backend.mjs). A
+/// GUI-launched macOS app inherits almost no environment, so relying on a
+/// shell-exported GLASS_HOME fails on double-click. Fall back through: the
+/// runtime env, the value baked in at build time (`GLASS_HOME=… tauri build`),
+/// then the conventional dev checkout locations under $HOME.
+fn resolve_glass_home() -> Option<String> {
+    let has_backend = |dir: &Path| dir.join("deploy").join("glass-backend.mjs").is_file();
+
+    if let Ok(h) = std::env::var("GLASS_HOME") {
+        if !h.is_empty() && has_backend(Path::new(&h)) {
+            return Some(h);
+        }
+    }
+    if let Some(h) = option_env!("GLASS_HOME") {
+        if !h.is_empty() && has_backend(Path::new(h)) {
+            return Some(h.to_string());
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        for cand in ["projects/glass", "Projects/glass"] {
+            let p = Path::new(&home).join(cand);
+            if has_backend(&p) {
+                return Some(p.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
+}
+
 fn main() {
     let app = tauri::Builder::default()
         .manage(Backend::default())
@@ -433,8 +456,20 @@ fn main() {
                 .separator()
                 .close_window()
                 .build()?;
+            // Edit menu: without it macOS never binds Cmd+C/V/X/A (and undo/redo)
+            // to the webview's native edit actions, so copy/paste don't work at
+            // all. These predefined items carry the standard accelerators.
+            let edit_menu = SubmenuBuilder::new(app, "Edit")
+                .undo()
+                .redo()
+                .separator()
+                .cut()
+                .copy()
+                .paste()
+                .select_all()
+                .build()?;
             let menu = MenuBuilder::new(app)
-                .items(&[&app_menu, &file_menu])
+                .items(&[&app_menu, &edit_menu, &file_menu])
                 .build()?;
             app.set_menu(menu)?;
             app.on_menu_event(|app_handle, event| {

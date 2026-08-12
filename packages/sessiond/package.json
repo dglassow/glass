@@ -16,6 +16,10 @@
     "typecheck": "tsc -b"
   },
   "dependencies": {
-    "@glass/protocol": "workspace:*"
+    "@glass/protocol": "workspace:*",
+    "node-pty": "^1.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22"
   }
 }

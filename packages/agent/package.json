@@ -17,5 +17,8 @@
   },
   "dependencies": {
     "@glass/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22"
   }
 }

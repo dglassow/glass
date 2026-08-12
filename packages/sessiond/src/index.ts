@@ -10,13 +10,13 @@
  * the worker over a Unix domain socket; it never imports the worker (agent) or
  * the hub. The socket is the seam, the protocol is the contract.
  *
- * Skeleton only — no behavior yet (Phase 0).
+ * The executable entrypoint is `main.ts`.
  */
 import { PROTOCOL_VERSION } from "@glass/protocol";
 
 export const TIER = "sessiond" as const;
 export const SPEAKS_PROTOCOL = PROTOCOL_VERSION;
 
-export function startSessiond(): never {
-  throw new Error("sessiond: not implemented (Phase 0 skeleton)");
-}
+export { PtySession, type OutputChunk, type ExitInfo } from "./pty.js";
+export { createSessiondServer, type SessiondServer } from "./server.js";
+export { ensureSpawnHelper } from "./spawn-helper.js";

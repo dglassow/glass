@@ -10,7 +10,7 @@
  * hub or the viewer; if they need to share something it goes in the protocol.
  * It reaches the session daemon over a socket, not by import.
  *
- * Skeleton only — no behavior yet (Phase 0).
+ * The executable entrypoint is `main.ts`; `client.ts` is the throwaway CLI.
  */
 import { PROTOCOL_VERSION } from "@glass/protocol";
 
@@ -18,6 +18,4 @@ export const TIER = "worker" as const;
 export const ROLE = "agent" as const;
 export const SPEAKS_PROTOCOL = PROTOCOL_VERSION;
 
-export function startAgent(): never {
-  throw new Error("agent: not implemented (Phase 0 skeleton)");
-}
+export { startAgent, type AgentOptions, type RunningAgent } from "./relay.js";

@@ -12,9 +12,11 @@ detects but does not manage.
 
 ## Status
 
-Phase 0. The protocol package is defined and the process-topology tiers
-(`supervisor`, `sessiond`, `agent`, `hub`) are scaffolded as empty skeletons
-with their dependency boundaries enforced. No behavior yet.
+Phase 0 complete; Phase 1 milestone 1 (the local loop) done. `sessiond` owns
+PTYs over a Unix socket, `agent` relays them with protocol envelopes, and a
+throwaway CLI client attaches and runs a shell. The load-bearing property is
+proven by `tests/m1-acceptance.mjs`: kill and restart the worker and the shell
+survives with scrollback intact. `supervisor` and `hub` are still skeletons.
 
 ## Layout
 
@@ -22,9 +24,9 @@ with their dependency boundaries enforced. No behavior yet.
 packages/
   protocol/     the wire contract — everything depends on this, and on nothing else shared
   supervisor/   lifecycle tier, rarely updated                     (skeleton)
-  sessiond/     owns PTYs, survives updates                        (skeleton)
+  sessiond/     owns PTYs, survives updates                        (M1: PTY over socket)
   hub/          registry, auth, vault, relay, update distribution  (skeleton)
-  agent/        worker: session routing and providers              (skeleton)
+  agent/        worker: session routing and providers              (M1: relay + CLI client)
   viewer/       shared web frontend — webview on desktop, PWA on mobile (not yet built)
   desktop/      Tauri shell                                        (not yet built)
   cli/          secret injection, enrollment                       (not yet built)

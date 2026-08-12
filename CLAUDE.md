@@ -11,14 +11,17 @@ Solo project, personal infrastructure. Ground-up rebuild — replaces Prism, sup
 
 ## Current state
 
-**Phase 0, partially complete.**
+**Phase 0 complete. Phase 1 milestone 1 (local loop) done.**
 
 Done:
-- Monorepo (pnpm workspaces), `@glass/protocol` with zod schemas, version negotiation, CI
-- Process topology tiers scaffolded as skeletons (`supervisor`, `sessiond`, `agent`, `hub`), boundaries enforced by TS project references (only `protocol` is shared; `supervisor` deliberately can't import it)
+- Monorepo (pnpm workspaces), `@glass/protocol` with zod schemas, version negotiation, NDJSON framing, CI
+- Process topology (`supervisor`, `sessiond`, `agent`, `hub`) with boundaries enforced by TS project references (only `protocol` is shared; `supervisor` deliberately can't import it)
+- Phase 1 M1 local loop: `sessiond` owns PTYs and exposes them over a Unix socket; `agent` is a stateless relay over protocol envelopes; a throwaway CLI client (`agent`'s `client.ts`) attaches and runs a shell. Acceptance test (`tests/m1-acceptance.mjs`) passes: SIGKILL + restart of the worker leaves the shell alive with scrollback intact, including output produced while the worker was down. `supervisor` and `hub` are still skeletons.
 
-Not started:
-- Everything in Phase 1 onward (the topology skeletons carry no behavior yet)
+Scope of what M1 proves: the load-bearing decision (PTYs survive a worker swap because they live in `sessiond`). It does NOT yet cover the Phase 4 blue/green `sessiond`→`sessiond` fd handoff (SCM_RIGHTS) — that is a different mechanism.
+
+Next:
+- Phase 1 remainder: Hub + registry, desktop Viewer with panes (plan §14: "run a shell on Pro")
 
 Apple code signing is complete (`Developer ID Application: Daniel Glassow (Z6ATGC7GNB)`); the notarization API key is pending but blocks nothing until Phase 4.
 

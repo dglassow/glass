@@ -15,10 +15,10 @@ Solo project, personal infrastructure. Ground-up rebuild — replaces Prism, sup
 
 Done:
 - Monorepo (pnpm workspaces), `@glass/protocol` with zod schemas, version negotiation, CI
+- Process topology tiers scaffolded as skeletons (`supervisor`, `sessiond`, `agent`, `hub`), boundaries enforced by TS project references (only `protocol` is shared; `supervisor` deliberately can't import it)
 
 Not started:
-- Process topology packages (`supervisor`, `sessiond`, `agent`, `hub`)
-- Everything in Phase 1 onward
+- Everything in Phase 1 onward (the topology skeletons carry no behavior yet)
 
 Apple code signing is complete (`Developer ID Application: Daniel Glassow (Z6ATGC7GNB)`); the notarization API key is pending but blocks nothing until Phase 4.
 

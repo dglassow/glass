@@ -1,5 +1,5 @@
 {
-  "name": "@glass/protocol",
+  "name": "@glass/sessiond",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -16,6 +16,6 @@
     "typecheck": "tsc -b"
   },
   "dependencies": {
-    "zod": "^3.25.76"
+    "@glass/protocol": "workspace:*"
   }
 }

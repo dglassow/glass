@@ -12,17 +12,19 @@ detects but does not manage.
 
 ## Status
 
-Phase 0. The protocol package is defined; nothing else is built yet.
+Phase 0. The protocol package is defined and the process-topology tiers
+(`supervisor`, `sessiond`, `agent`, `hub`) are scaffolded as empty skeletons
+with their dependency boundaries enforced. No behavior yet.
 
 ## Layout
 
 ```
 packages/
   protocol/     the wire contract — everything depends on this, and on nothing else shared
-  supervisor/   lifecycle tier, rarely updated                     (not yet built)
-  sessiond/     owns PTYs, survives updates                        (not yet built)
-  hub/          registry, auth, vault, relay, update distribution  (not yet built)
-  agent/        worker: session routing and providers              (not yet built)
+  supervisor/   lifecycle tier, rarely updated                     (skeleton)
+  sessiond/     owns PTYs, survives updates                        (skeleton)
+  hub/          registry, auth, vault, relay, update distribution  (skeleton)
+  agent/        worker: session routing and providers              (skeleton)
   viewer/       shared web frontend — webview on desktop, PWA on mobile (not yet built)
   desktop/      Tauri shell                                        (not yet built)
   cli/          secret injection, enrollment                       (not yet built)

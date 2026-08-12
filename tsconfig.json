@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/protocol" },
+    { "path": "packages/supervisor" },
+    { "path": "packages/sessiond" },
+    { "path": "packages/agent" },
+    { "path": "packages/hub" }
+  ]
+}

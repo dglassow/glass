@@ -12,8 +12,8 @@
  *  - Bounded protocol advance: the hub may raise the wire protocol by at most 1
  *    per update, so it always still speaks N-1 for spokes that were offline.
  */
-import { resolve } from "node:path";
-import { existsSync, rmSync } from "node:fs";
+import { resolve, sep } from "node:path";
+import { existsSync, rmSync, realpathSync, lstatSync } from "node:fs";
 import { PROTOCOL_VERSION } from "@glass/protocol";
 import { parseSemVer, isNewer, compareSemVer, type SemVer } from "./semver.js";
 import { GitUpdateSource, type ReleaseManifest } from "./update-source.js";
@@ -100,8 +100,10 @@ export class Updater {
    * UpdateVerifyError on any inconsistency — the caller must NOT swap on throw.
    */
   stage(tag: string): StageResult {
-    // Re-verify at stage time: never trust a tag name a caller hands us.
-    const v = this.source.verifyTag(tag);
+    // Pin to an immutable OID and use it for BOTH verify and export, so a
+    // concurrent `git tag -f` can't swap the tree between the two (TOCTOU).
+    const oid = this.source.resolveTagObject(tag);
+    const v = this.source.verifyObject(oid);
     if (!v.trusted) throw new UpdateVerifyError(`refusing to stage ${tag}: signature not trusted`);
 
     const tagVer = parseSemVer(tag);
@@ -112,7 +114,7 @@ export class Updater {
 
     const stagingDir = resolve(this.opts.stagingRoot, `stage-${tag}`);
     rmSync(stagingDir, { recursive: true, force: true });
-    this.source.exportTag(tag, stagingDir);
+    this.source.exportObject(oid, stagingDir); // SAME oid — byte-identical, no symlinks/submodules
 
     const manifest = GitUpdateSource.readManifest(stagingDir);
 
@@ -138,6 +140,18 @@ export class Updater {
     }
     if (!existsSync(entryPath)) {
       throw new UpdateVerifyError(`entry not present in release: ${manifest.entry}`);
+    }
+    // Defense in depth against symlink escape: the entry must be a regular file
+    // whose REAL path (symlinks resolved) still lives inside the staging dir.
+    // exportObject already refuses symlinks, so this should never fire — but a
+    // lexical startsWith check alone is exactly what the red-team defeated.
+    if (lstatSync(entryPath).isSymbolicLink() || !lstatSync(entryPath).isFile()) {
+      throw new UpdateVerifyError(`entry is not a regular file: ${manifest.entry}`);
+    }
+    const realEntry = realpathSync(entryPath);
+    const realStaging = realpathSync(stagingDir);
+    if (realEntry !== realStaging && !realEntry.startsWith(realStaging + sep)) {
+      throw new UpdateVerifyError(`entry resolves outside staging via symlink: ${manifest.entry}`);
     }
 
     return {

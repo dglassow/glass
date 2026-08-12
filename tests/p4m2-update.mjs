@@ -254,6 +254,109 @@ check("semver: isNewer strict (equal is not newer)", !isNewer(parseSemVer("1.2.3
   if (d.action === "apply") check("distribution: staged tree matches fetched release", updater(cloneDir).stage("v1.2.0").version === "1.2.0");
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Red-team regressions — each corresponds to a CONFIRMED bypass found by the
+// adversarial workflow against the first cut of this gate. They must stay red
+// if the hardening is ever removed.
+// ─────────────────────────────────────────────────────────────────────────
+console.log("\n  \x1b[90m— red-team regressions —\x1b[0m");
+
+// #1 CRITICAL: gpg.ssh.program injection via the repo's .git/config. git reads
+// that key from the untrusted repo; a fake ssh-keygen would print "good" for any
+// key. The gate must pin gpg.ssh.program to the real ssh-keygen (-c outranks
+// repo config), so an attacker-key-signed tag stays untrusted.
+{
+  const r = newRepo();
+  commitRelease(r, { version: "1.1.0" });
+  signTag(r, "v1.1.0", RELEASE);
+  commitRelease(r, { version: "2.0.0", entryContent: "// PWNED\n" });
+  signTag(r, "v2.0.0", EVIL); // attacker's own key
+  const fake = join(keys, `fake-keygen-${repoN}.sh`);
+  writeFileSync(
+    fake,
+    `#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+    find-principals) echo "glass-release-0"; exit 0;;
+    verify) echo 'Good "git" signature for glass-release-0 with ED25519 key SHA256:AAAAfake'; exit 0;;
+  esac
+done
+echo 'Good "git" signature for glass-release-0 with ED25519 key SHA256:AAAAfake'
+exit 0
+`,
+    { mode: 0o755 },
+  );
+  r.g("config", "gpg.ssh.program", fake); // the injection
+  const src = new GitUpdateSource(r.dir, PINNED);
+  check("redteam#1: gpg.ssh.program injection does NOT trust the attacker tag", src.verifyTag("v2.0.0").trusted === false);
+  const d = updater(r.dir).checkForUpdate();
+  check("redteam#1: injected repo still only applies the pinned-key release", d.action === "apply" && d.tag === "v1.1.0", d.tag);
+}
+
+// #2/#4 HIGH: a symlink at the entry path escapes staging. The export must
+// refuse symlinks so the supervisor never runs code outside the signed tree.
+{
+  const r = newRepo();
+  mkdirSync(join(r.dir, "packages/hub/dist"), { recursive: true });
+  writeFileSync(join(r.dir, "release.json"), JSON.stringify({ version: "1.1.0", protocolVersion: 1, entry: "packages/hub/dist/main.js" }));
+  execFileSync("ln", ["-s", "/etc/passwd", join(r.dir, "packages/hub/dist/main.js")]);
+  r.g("add", "-A");
+  r.g("commit", "-qm", "symlink release");
+  signTag(r, "v1.1.0");
+  check("redteam#2: symlink in release tree is refused", throws(() => updater(r.dir).stage("v1.1.0"), /symlink|escapes|regular file/));
+}
+
+// #3 CRITICAL: TOCTOU — the tag ref is flipped between verify and export.
+// Pinning to an immutable OID must make both operations see the SAME content.
+{
+  const r = newRepo();
+  commitRelease(r, { version: "1.1.0" });
+  signTag(r, "v1.1.0");
+  commitRelease(r, { version: "2.0.0", entryContent: "// GOOD v2 signed\n" });
+  signTag(r, "v2.0.0"); // properly signed at the good commit
+  const src = new GitUpdateSource(r.dir, PINNED);
+  const pinnedOid = src.resolveTagObject("v2.0.0");
+  const evil = commitRelease(r, { version: "2.0.0", entryContent: "// EVIL v2\n" });
+  r.g("tag", "-f", "v2.0.0", evil); // flip the ref AFTER we pinned the OID
+  const dest = join(ROOT, `toctou-${repoN}`);
+  src.exportObject(pinnedOid, dest);
+  check("redteam#3: pinned OID still verifies after the ref flip", src.verifyObject(pinnedOid).trusted === true);
+  check("redteam#3: pinned OID exports the SIGNED tree, not the flipped one", readFileSync(join(dest, "packages/hub/dist/main.js"), "utf8").includes("GOOD v2 signed"));
+}
+
+// #5a LOW: git archive would expand `$Format:%H$` under `export-subst`. Direct
+// blob extraction must keep the staged bytes byte-identical to the signed blob.
+{
+  const r = newRepo();
+  const dist = join(r.dir, "packages/hub/dist");
+  mkdirSync(dist, { recursive: true });
+  writeFileSync(join(r.dir, "release.json"), JSON.stringify({ version: "1.1.0", protocolVersion: 1, entry: "packages/hub/dist/main.js" }));
+  writeFileSync(join(dist, "main.js"), "// commit=$Format:%H$\n");
+  writeFileSync(join(r.dir, ".gitattributes"), "* export-subst\n");
+  r.g("add", "-A");
+  r.g("commit", "-qm", "subst");
+  signTag(r, "v1.1.0");
+  const s = updater(r.dir).stage("v1.1.0");
+  check("redteam#5a: export-subst placeholder is NOT expanded", readFileSync(s.entryPath, "utf8").includes("$Format:%H$"));
+}
+
+// #5b LOW: git archive would DROP an `export-ignore` file. Direct extraction
+// must keep every signed file present.
+{
+  const r = newRepo();
+  const dist = join(r.dir, "packages/hub/dist");
+  mkdirSync(dist, { recursive: true });
+  writeFileSync(join(r.dir, "release.json"), JSON.stringify({ version: "1.1.0", protocolVersion: 1, entry: "packages/hub/dist/main.js" }));
+  writeFileSync(join(dist, "main.js"), "// main\n");
+  writeFileSync(join(dist, "extra.js"), "// signed extra\n");
+  writeFileSync(join(r.dir, ".gitattributes"), "packages/hub/dist/extra.js export-ignore\n");
+  r.g("add", "-A");
+  r.g("commit", "-qm", "ignore");
+  signTag(r, "v1.1.0");
+  const s = updater(r.dir).stage("v1.1.0");
+  check("redteam#5b: export-ignore file is still present in the staged tree", existsSync(join(s.stagingDir, "packages/hub/dist/extra.js")));
+}
+
 rmSync(ROOT, { recursive: true, force: true });
 
 const passed = checks.filter((c) => c.ok).length;

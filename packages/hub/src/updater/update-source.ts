@@ -1,28 +1,30 @@
 /**
  * A git-backed update source (plan §4: "GitHub is the source of truth ... The
  * Hub tracks it"). Wraps the git plumbing the updater needs: refresh tags from
- * the remote, enumerate release tags, verify a tag's signature, and export the
- * *exact tree that tag names* to a staging dir.
+ * the remote, enumerate release tags, resolve a tag to an immutable OID, verify
+ * that OID's signature, and export the *exact tree that OID names* to a staging
+ * dir.
  *
- * Export (not a live checkout) matters: `git archive <tag>` writes the tree the
- * verified tag object points at and nothing else — no working-tree state, no
- * .git the box could be tricked into re-fetching from. Because a good tag
- * signature Merkle-fixes the whole tree, every file in the export — including
- * release.json — is authenticated by that one signature.
+ * HARDENING (red-team):
+ *  - Everything is pinned to an OID, never a ref name, so the ref can't be
+ *    flipped between verify and export (TOCTOU).
+ *  - Export is a direct `ls-tree` + `cat-file blob` extraction, NOT `git
+ *    archive`. That (a) writes bytes byte-identical to the signed blob objects,
+ *    defeating `.gitattributes` export-subst/export-ignore rewrites; and (b)
+ *    refuses symlinks and submodules outright, so nothing in the staged tree can
+ *    resolve outside the staging dir.
+ *  - All git invocations run with global/system config neutralized.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { resolve, dirname, sep, isAbsolute } from "node:path";
 import { parseSemVer, compareSemVer, type SemVer } from "./semver.js";
-import { verifyTagSignature, type VerifyResult, UpdateVerifyError } from "./verify.js";
+import { verifyTagSignature, hardenedGitEnv, type VerifyResult, UpdateVerifyError } from "./verify.js";
 
 export interface ReleaseManifest {
   version: string;
-  /** wire protocol this build speaks (compared to @glass/protocol locally) */
   protocolVersion: number;
-  /** oldest peer protocol this build still talks to; defaults to protocolVersion-1 */
   minPeerProtocol?: number;
-  /** worker entry, relative to the staging dir (e.g. "packages/hub/dist/main.js") */
   entry: string;
 }
 
@@ -31,9 +33,10 @@ export interface ReleaseTag {
   version: SemVer;
 }
 
-function git(repoDir: string, args: string[]): { status: number; stdout: string; stderr: string } {
-  const res = spawnSync("git", ["-C", repoDir, ...args], { encoding: "utf8" });
-  return { status: res.status ?? -1, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+function isInside(child: string, parent: string): boolean {
+  const c = resolve(child);
+  const p = resolve(parent);
+  return c === p || c.startsWith(p + sep);
 }
 
 export class GitUpdateSource {
@@ -46,15 +49,29 @@ export class GitUpdateSource {
     }
   }
 
+  private git(args: string[], opts: { encoding?: "utf8" | "buffer" } = {}): { status: number; stdout: string; stderr: string } {
+    const res = spawnSync("git", ["-C", this.repoDir, ...args], {
+      encoding: "utf8",
+      env: hardenedGitEnv(),
+      maxBuffer: 512 * 1024 * 1024,
+      ...(opts.encoding === "buffer" ? { encoding: "buffer" as BufferEncoding } : {}),
+    });
+    return { status: res.status ?? -1, stdout: (res.stdout as string) ?? "", stderr: (res.stderr as string) ?? "" };
+  }
+
+  private gitBuffer(args: string[]): { status: number; stdout: Buffer; stderr: string } {
+    const res = spawnSync("git", ["-C", this.repoDir, ...args], { env: hardenedGitEnv(), maxBuffer: 512 * 1024 * 1024 });
+    return { status: res.status ?? -1, stdout: (res.stdout as Buffer) ?? Buffer.alloc(0), stderr: res.stderr?.toString() ?? "" };
+  }
+
   /** Pull latest tags/objects from the tracked remote. Best-effort offline. */
   fetch(remote = "origin"): boolean {
-    const r = git(this.repoDir, ["fetch", "--tags", "--prune", "--force", remote]);
-    return r.status === 0;
+    return this.git(["fetch", "--tags", "--prune", "--force", remote]).status === 0;
   }
 
   /** Release tags (v*), newest first. Non-version tags are ignored. */
   listReleaseTags(): ReleaseTag[] {
-    const r = git(this.repoDir, ["tag", "--list", "v*"]);
+    const r = this.git(["tag", "--list", "v*"]);
     if (r.status !== 0) return [];
     const tags: ReleaseTag[] = [];
     for (const line of r.stdout.split("\n")) {
@@ -63,28 +80,80 @@ export class GitUpdateSource {
       const version = parseSemVer(name);
       if (version) tags.push({ tag: name, version });
     }
-    tags.sort((a, b) => compareSemVer(b.version, a.version)); // newest first
+    tags.sort((a, b) => compareSemVer(b.version, a.version));
     return tags;
   }
 
-  verifyTag(tag: string): VerifyResult {
-    return verifyTagSignature(this.repoDir, tag, this.allowedSignersPath);
+  /**
+   * Resolve a release tag to the immutable OID of its annotated tag object.
+   * Rejects lightweight tags (which are unsigned commit refs). Everything
+   * downstream keys off this OID so a concurrent `git tag -f` can't swap the
+   * content out from under verify/export.
+   */
+  resolveTagObject(tag: string): string {
+    const rp = this.git(["rev-parse", "--verify", "--end-of-options", `refs/tags/${tag}`]);
+    if (rp.status !== 0) throw new UpdateVerifyError(`cannot resolve tag ${tag}: ${rp.stderr.trim()}`);
+    const oid = rp.stdout.trim();
+    if (!/^[0-9a-f]{40,64}$/.test(oid)) throw new UpdateVerifyError(`bad OID for ${tag}: ${oid}`);
+    const typ = this.git(["cat-file", "-t", oid]);
+    if (typ.stdout.trim() !== "tag") {
+      throw new UpdateVerifyError(`${tag} is not an annotated tag object (lightweight/unsigned tags are refused)`);
+    }
+    return oid;
   }
 
-  /** Export the tree the (already-verified) tag points at into destDir. */
-  exportTag(tag: string, destDir: string): void {
-    mkdirSync(destDir, { recursive: true, mode: 0o700 });
-    // `git archive <tag> | tar -x` — export the authenticated tree, nothing else.
-    const archive = spawnSync("git", ["-C", this.repoDir, "archive", "--format=tar", tag], {
-      encoding: "buffer",
-      maxBuffer: 512 * 1024 * 1024,
-    });
-    if (archive.status !== 0) {
-      throw new UpdateVerifyError(`git archive ${tag} failed: ${archive.stderr?.toString() ?? ""}`);
+  /** Verify the signature of a tag OID against the pinned allowed-signers. */
+  verifyObject(oid: string): VerifyResult {
+    return verifyTagSignature(this.repoDir, oid, this.allowedSignersPath);
+  }
+
+  /**
+   * Convenience for the scan: resolve a tag name to its OID and verify it. A
+   * tag that won't resolve to an annotated object (lightweight, re-pointed to a
+   * commit, missing) is simply *untrusted* — returned as trusted:false so one
+   * tampered tag can't abort the whole scan. Genuine misconfiguration (missing
+   * pinned key, no ssh-keygen) still throws, from verifyObject.
+   */
+  verifyTag(tag: string): VerifyResult {
+    let oid: string;
+    try {
+      oid = this.resolveTagObject(tag);
+    } catch (e) {
+      return { trusted: false, signer: null, fingerprint: null, detail: e instanceof Error ? e.message : String(e) };
     }
-    const untar = spawnSync("tar", ["-x", "-C", destDir], { input: archive.stdout });
-    if (untar.status !== 0) {
-      throw new UpdateVerifyError(`untar of ${tag} failed: ${untar.stderr?.toString() ?? ""}`);
+    return this.verifyObject(oid);
+  }
+
+  /**
+   * Export the tree of a (already-verified) tag OID into destDir by walking the
+   * tree and writing each blob byte-for-byte from the object store. Refuses
+   * symlinks and submodules so nothing in the staged tree escapes destDir.
+   */
+  exportObject(oid: string, destDir: string): void {
+    mkdirSync(destDir, { recursive: true, mode: 0o700 });
+    const dest = resolve(destDir);
+    const ls = this.gitBuffer(["ls-tree", "-r", "-z", "--full-tree", oid]);
+    if (ls.status !== 0) throw new UpdateVerifyError(`ls-tree ${oid} failed: ${ls.stderr}`);
+    const entries = ls.stdout.toString("utf8").split("\0").filter((s) => s.length > 0);
+    for (const line of entries) {
+      // "<mode> SP <type> SP <objectname> TAB <path>"
+      const tab = line.indexOf("\t");
+      if (tab < 0) continue;
+      const [mode, type, sha] = line.slice(0, tab).trim().split(/\s+/);
+      const path = line.slice(tab + 1);
+      if (!mode || !type || !sha) throw new UpdateVerifyError(`malformed ls-tree entry: ${line}`);
+      if (type === "commit" || mode === "160000") throw new UpdateVerifyError(`refusing release with a submodule at ${path}`);
+      if (mode === "120000") throw new UpdateVerifyError(`refusing release with a symlink at ${path}`);
+      if (type !== "blob") throw new UpdateVerifyError(`unexpected tree entry type ${type} at ${path}`);
+      if (isAbsolute(path) || path.startsWith("/") || path.split("/").includes("..")) {
+        throw new UpdateVerifyError(`unsafe path in release: ${path}`);
+      }
+      const target = resolve(dest, path);
+      if (!isInside(target, dest)) throw new UpdateVerifyError(`path escapes staging: ${path}`);
+      mkdirSync(dirname(target), { recursive: true });
+      const blob = this.gitBuffer(["cat-file", "blob", sha]);
+      if (blob.status !== 0) throw new UpdateVerifyError(`cat-file blob ${sha} failed: ${blob.stderr}`);
+      writeFileSync(target, blob.stdout, { mode: mode === "100755" ? 0o755 : 0o644 });
     }
   }
 

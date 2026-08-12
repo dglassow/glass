@@ -7,10 +7,14 @@
  * who controls the repo would swap both the code and the key and verification
  * would pass — so we refuse an allowed-signers path that lives inside repoDir.
  *
- * git returns 0 only for a good signature from a principal listed in that file;
- * unsigned tags, lightweight tags, wrong-key signatures, and "no principal
- * matched" all return non-zero. We gate on the exit code (the documented
- * contract) and additionally require a GOODSIG-shaped line as defense in depth.
+ * HARDENING (found by red-team): `git verify-tag` delegates SSH verification to
+ * the program named by `gpg.ssh.program`, which git reads from the *repo's own*
+ * .git/config. An attacker who controls the repo can point that at a script
+ * that prints a fake "Good signature" and exits 0 — bypassing the pinned key
+ * entirely. So we PIN gpg.ssh.program to the real ssh-keygen via a command-line
+ * `-c` (which outranks every config file) and neutralize global/system git
+ * config. The caller must also pass an immutable OID (not a ref name) so the ref
+ * can't be flipped between verify and export (TOCTOU).
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
@@ -28,6 +32,46 @@ export interface VerifyResult {
 
 export class UpdateVerifyError extends Error {}
 
+/** Candidate absolute paths for the *real* ssh-keygen, in priority order. */
+const SSH_KEYGEN_CANDIDATES = [
+  process.env.GLASS_SSH_KEYGEN,
+  "/usr/bin/ssh-keygen",
+  "/bin/ssh-keygen",
+  "/usr/local/bin/ssh-keygen",
+  "/opt/homebrew/bin/ssh-keygen",
+].filter((p): p is string => typeof p === "string" && p.length > 0);
+
+let cachedSshKeygen: string | null = null;
+function realSshKeygen(): string {
+  if (cachedSshKeygen) return cachedSshKeygen;
+  for (const p of SSH_KEYGEN_CANDIDATES) {
+    try {
+      if (existsSync(p) && statSync(p).isFile()) {
+        cachedSshKeygen = p;
+        return p;
+      }
+    } catch {
+      /* try next */
+    }
+  }
+  // Fail closed: without a trusted verifier program we cannot verify anything.
+  throw new UpdateVerifyError(
+    "could not locate a real ssh-keygen to pin as gpg.ssh.program (set GLASS_SSH_KEYGEN)",
+  );
+}
+
+/** git env that ignores global/system config so only our -c overrides + repo apply. */
+export function hardenedGitEnv(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_SYSTEM: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_ATTR_NOSYSTEM: "1",
+  };
+}
+
 function isInside(child: string, parent: string): boolean {
   const c = resolve(child);
   const p = resolve(parent);
@@ -35,25 +79,22 @@ function isInside(child: string, parent: string): boolean {
 }
 
 /**
- * Verify the SSH signature on an annotated tag against a pinned allowed-signers
- * file. Never throws on an *untrusted* tag — that returns {trusted:false}, which
- * the caller treats as "do not apply". Throws only on misconfiguration
- * (missing repo/allowed-signers, or an allowed-signers file inside the repo).
+ * Verify the SSH signature on a tag *object* (pass an immutable OID, not a ref
+ * name, so it can't be flipped). Never throws on an *untrusted* tag — that
+ * returns {trusted:false}. Throws only on misconfiguration (missing
+ * repo/allowed-signers, in-repo allowed-signers, or no real ssh-keygen).
  */
-export function verifyTagSignature(repoDir: string, tag: string, allowedSignersPath: string): VerifyResult {
+export function verifyTagSignature(repoDir: string, ref: string, allowedSignersPath: string): VerifyResult {
   if (!existsSync(repoDir) || !statSync(repoDir).isDirectory()) {
     throw new UpdateVerifyError(`repo dir does not exist: ${repoDir}`);
   }
   if (!existsSync(allowedSignersPath) || !statSync(allowedSignersPath).isFile()) {
-    // Fail closed: no pinned key ⇒ nothing is trusted, and this is a
-    // misconfiguration worth surfacing loudly rather than silently trusting.
     throw new UpdateVerifyError(`pinned allowed-signers file not found: ${allowedSignersPath}`);
   }
   if (statSync(allowedSignersPath).size === 0) {
     throw new UpdateVerifyError(`pinned allowed-signers file is empty: ${allowedSignersPath}`);
   }
   if (isInside(allowedSignersPath, repoDir)) {
-    // The whole point of pinning is that the repo can't vouch for itself.
     throw new UpdateVerifyError(
       `allowed-signers file must live OUTSIDE the repo it verifies (got ${allowedSignersPath} inside ${repoDir})`,
     );
@@ -64,24 +105,24 @@ export function verifyTagSignature(repoDir: string, tag: string, allowedSignersP
     [
       "-C",
       repoDir,
+      // Command-line -c outranks every config file, so a repo-local
+      // gpg.ssh.program / gpg.format / allowedSignersFile cannot override these.
       "-c",
       "gpg.format=ssh",
+      "-c",
+      `gpg.ssh.program=${realSshKeygen()}`,
       "-c",
       `gpg.ssh.allowedSignersFile=${resolve(allowedSignersPath)}`,
       "verify-tag",
       "--raw",
       "--",
-      tag,
+      ref,
     ],
-    { encoding: "utf8" },
+    { encoding: "utf8", env: hardenedGitEnv() },
   );
 
-  // git writes the human/`--raw` status to stderr.
   const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
   const trustedExit = res.status === 0;
-
-  // Defense in depth: even on exit 0, require the trusted-signature marker and
-  // a matched principal. "No principal matched" must never count as trusted.
   const goodSig = /\bGOODSIG\b/.test(out) || /Good "git" signature for /.test(out);
   const noPrincipal = /No principal matched/i.test(out);
   const trusted = trustedExit && goodSig && !noPrincipal;

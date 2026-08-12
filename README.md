@@ -12,13 +12,16 @@ detects but does not manage.
 
 ## Status
 
-Phase 0 complete; Phase 1 milestones 1–2 done. `sessiond` owns PTYs over a Unix
-socket, `agent` relays them, and `hub` is a WebSocket registry+relay so a viewer
-runs a shell on a named agent *through the hub*. The load-bearing property holds
-locally (`tests/m1-acceptance.mjs`) and across the hub (`tests/m2-acceptance.mjs`):
-kill and restart the worker and the shell survives with scrollback intact, even
-output produced while no worker existed. Only `supervisor` is still a skeleton;
-the desktop Viewer is next.
+Phase 0 complete; Phase 1 milestones 1–3 done. `sessiond` owns PTYs over a Unix
+socket, `agent` relays them, `hub` is a WebSocket registry+relay, and `viewer`
+is the shared web frontend (xterm.js panes over the hub). The load-bearing
+property is proven end-to-end — locally (`tests/m1-acceptance.mjs`), through the
+hub (`tests/m2-acceptance.mjs`), and in the real viewer client
+(`tests/m3-viewer.mjs`): kill and restart the worker and the shell survives with
+scrollback intact, even output produced while no worker existed; the viewer
+re-attaches on its own. 38 checks, all in CI. The xterm GUI bundles; the Tauri
+desktop shell (`packages/desktop`) is scaffolded for a Mac build. `supervisor`
+is the only remaining skeleton.
 
 ## Layout
 
@@ -29,8 +32,8 @@ packages/
   sessiond/     owns PTYs, survives updates                        (M1: PTY over socket)
   hub/          registry, auth, vault, relay, update distribution  (M2: WS registry + relay)
   agent/        worker: session routing and providers              (M1 relay + M2 hub bridge)
-  viewer/       shared web frontend — webview on desktop, PWA on mobile (not yet built)
-  desktop/      Tauri shell                                        (not yet built)
+  viewer/       shared web frontend — webview on desktop, PWA on mobile (M3: xterm panes over the hub)
+  desktop/      Tauri shell                                        (M3 scaffold — build on a Mac)
   cli/          secret injection, enrollment                       (not yet built)
 ```
 

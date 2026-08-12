@@ -1,2 +1,5 @@
 packages:
   - "packages/*"
+  # Tauri shell — excluded so its Rust/CLI toolchain isn't required to install
+  # or CI the rest of the repo. Build it directly on a Mac (see its README).
+  - "!packages/desktop"

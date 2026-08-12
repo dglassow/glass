@@ -1,0 +1,32 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Glass",
+  "version": "0.0.0",
+  "identifier": "com.glassow.glass",
+  "build": {
+    "frontendDist": "../../viewer/dist-web",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "pnpm --filter @glass/viewer dev",
+    "beforeBuildCommand": "pnpm --filter @glass/viewer build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Glass",
+        "width": 1100,
+        "height": 700,
+        "minWidth": 720,
+        "minHeight": 480
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "app",
+    "icon": []
+  }
+}

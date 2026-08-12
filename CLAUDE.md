@@ -11,7 +11,7 @@ Solo project, personal infrastructure. Ground-up rebuild — replaces Prism, sup
 
 ## Current state
 
-**Phase 0 complete. Phase 1 milestones 1–2 done.**
+**Phase 0 complete. Phase 1 milestones 1–3 done (backend + viewer verified; native shell scaffolded).**
 
 Done:
 - Monorepo (pnpm workspaces), `@glass/protocol` with zod schemas, version negotiation, NDJSON framing, CI
@@ -19,11 +19,15 @@ Done:
 - Phase 1 M1 local loop: `sessiond` owns PTYs over a Unix socket; `agent` relays over protocol envelopes; throwaway CLI client. `tests/m1-acceptance.mjs`: SIGKILL+restart of the worker leaves the shell alive with scrollback intact.
 - Phase 1 M2 Hub loop: `hub` is a WebSocket registry+relay (verbatim router; binds `from` to the handshaked identity; explicit `device_unknown`/`device_unreachable`/`unauthorized` errors; evicts a stale registration on agent restart). `agent` gains `--hub` mode: the sole address-translation boundary, with two *soft* tables (pending request→viewer, attached sessionId→Set<viewer>), always `from=agentId` toward sessiond so its `conn.peer` can't flap; multi-viewer fan-out lives here. `tests/m2-acceptance.mjs` (18 checks): a viewer runs a shell on a named agent through the hub, survives an agent SIGKILL+restart with scrollback across the outage, plus cross-viewer isolation, from-spoof rejection, and no-false-`session.exited`. Only `supervisor` is still a skeleton.
 
+- Phase 1 M3 Viewer: `@glass/viewer` is the shared web frontend. Its `hub-client.ts` is a DOM-free protocol client (connect, device.list, session create/attach/stream, and viewer-driven auto-reattach on the hub's `device.state` broadcast). The GUI is xterm.js terminal panes + a device/session sidebar (`main.ts`, `terminal-pane.ts`), a Vite app. `tests/m3-viewer.mjs` (11 checks) drives the *actual* built client against the real stack and proves auto-recovery: kill+restart the agent and the client re-attaches on its own with scrollback across the outage. `@glass/desktop` is a Tauri v2 scaffold wrapping the Viewer bundle — excluded from the pnpm workspace; needs Rust + a Mac to build (see its README).
+
+Verification honesty: the backend (hub/agent/sessiond) and the Viewer's data layer are proven by `tests/` (38 checks, in CI). The xterm.js GUI compiles and bundles but is not interactively verified headlessly; the Tauri shell is a scaffold, not built here.
+
 Protocol note: M2 added `roles` + `deviceName` to `Hello` (additive; v1 is unreleased so no N-1 concern) — the registry can't populate `DeviceRecord` without them. Self-asserted while auth is stubbed; Phase 2 enrollment makes them authoritative.
 
-Scope: M1/M2 prove the load-bearing decision (PTYs survive a worker swap) end-to-end and through the hub. NOT yet covered: the Phase 4 blue/green `sessiond`→`sessiond` fd handoff (SCM_RIGHTS), and the hub's own blue/green restart recovery.
+Scope: M1–M3 prove the load-bearing decision (PTYs survive a worker swap) end-to-end, through the hub, and into the viewer client. NOT yet covered: the Phase 4 blue/green `sessiond`→`sessiond` fd handoff (SCM_RIGHTS), the hub's own blue/green restart recovery, and running the GUI on real hardware ("from Studio, run a shell on Pro" — the last step is a human running the Tauri app on a Mac).
 
-Next (Phase 1 remainder): the desktop Viewer — shared web frontend with terminal panes over the hub (plan §5/§6, §14: "run a shell on Pro").
+Next: close out Phase 1 by running the desktop app on a Mac, then Phase 2 (enrollment, keypairs, passkey login, relay).
 
 Apple code signing is complete (`Developer ID Application: Daniel Glassow (Z6ATGC7GNB)`); the notarization API key is pending but blocks nothing until Phase 4.
 

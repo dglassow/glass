@@ -1,6 +1,11 @@
 node_modules/
 dist/
+dist-web/
 *.tsbuildinfo
+
+# Tauri (desktop shell) build artifacts
+packages/desktop/src-tauri/target/
+packages/desktop/src-tauri/gen/
 
 # Secrets and instance config never belong in this repo.
 # All of it lives in the backup bundle instead.

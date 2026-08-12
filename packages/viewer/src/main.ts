@@ -24,7 +24,7 @@
  * hub without touching the stored role.
  */
 import { HubClient } from "./hub-client.js";
-import { TerminalPane } from "./terminal-pane.js";
+import { Workspace, SESSION_MIME } from "./workspace.js";
 import { loadOrCreateIdentity, loadHubConfig, saveHubConfig, type DeviceIdentity, type HubConfig } from "./auth.js";
 import { showOnboarding, type Role } from "./onboarding.js";
 import { isNative, startBackend, stopBackend, onReconfigure, onSettings } from "./native.js";
@@ -356,12 +356,10 @@ function startApp(app: HTMLElement, identity: DeviceIdentity, config: HubConfig,
   deviceList.className = "devices";
   sidebar.append(deviceList);
 
-  const grid = document.createElement("main");
-  grid.className = "grid";
+  let workspace: Workspace;
+  let latestDevices: DeviceRecord[] = [];
+  let didAutoOpen = false;
 
-  app.append(sidebar, grid);
-
-  const panes = new Map<string, TerminalPane>();
   const client = new HubClient(
     config.hubUrl,
     identity.deviceId,
@@ -376,12 +374,17 @@ function startApp(app: HTMLElement, identity: DeviceIdentity, config: HubConfig,
         statusText.textContent = "reconnecting…";
         status.dataset["state"] = "waiting";
       },
-      onDevices: renderDevices,
+      onDevices: (devices) => {
+        latestDevices = devices;
+        renderSidebar();
+        maybeAutoOpen();
+      },
       onDeviceState: () => void refreshDevices(),
-      onScrollback: (sid, sb) => panes.get(sid)?.reset(sb),
-      onOutput: (sid, data) => panes.get(sid)?.write(data),
+      onScrollback: (sid, sb) => workspace.reset(sid, sb),
+      onOutput: (sid, data) => workspace.write(sid, data),
       onExited: (sid) => {
-        panes.get(sid)?.markDead("session exited");
+        workspace.markDead(sid, "session exited");
+        renderSidebar();
       },
       onError: (code, message) => {
         statusText.textContent = `error: ${code} — ${message}`;
@@ -393,56 +396,100 @@ function startApp(app: HTMLElement, identity: DeviceIdentity, config: HubConfig,
   );
   currentClient = client;
 
+  workspace = new Workspace(client, () => renderSidebar());
+  app.append(sidebar, workspace.el);
+
   async function refreshDevices(): Promise<void> {
     try {
-      renderDevices(await client.listDevices());
+      latestDevices = await client.listDevices();
+      renderSidebar();
+      maybeAutoOpen();
     } catch {
       /* not connected yet */
     }
   }
 
-  function renderDevices(devices: DeviceRecord[]): void {
+  /** Plan §6: start with one shell open on the first connected agent. */
+  function maybeAutoOpen(): void {
+    if (didAutoOpen || workspace.sessionList().length > 0) return;
+    const agent = latestDevices.find((d) => d.roles.includes("agent") && d.state === "connected");
+    if (agent) {
+      didAutoOpen = true;
+      void openShell(agent.id, agent.name);
+    }
+  }
+
+  async function openShell(agentId: string, agentName: string): Promise<void> {
+    try {
+      const n = workspace.sessionList().filter((s) => s.agentId === agentId).length + 1;
+      const session = await client.createSession(agentId, { kind: "pty" });
+      workspace.add(session.id, agentId, `${agentName} · shell ${n}`);
+      workspace.show(session.id); // switch to the new shell
+      renderSidebar();
+    } catch (err) {
+      statusText.textContent = `could not open shell: ${String(err)}`;
+    }
+  }
+
+  /** Sidebar: each agent (device) with its sessions nested beneath it. */
+  function renderSidebar(): void {
     deviceList.replaceChildren();
-    const agents = devices.filter((d) => d.roles.includes("agent"));
-    if (agents.length === 0) {
+    const agents = latestDevices.filter((d) => d.roles.includes("agent"));
+    const sessions = workspace.sessionList();
+    const agentIds = [...new Set([...agents.map((a) => a.id), ...sessions.map((s) => s.agentId)])];
+    if (agentIds.length === 0) {
       const empty = document.createElement("div");
       empty.className = "empty";
       empty.textContent = "no agents online";
       deviceList.append(empty);
       return;
     }
-    for (const agent of agents) {
+    for (const agentId of agentIds) {
+      const agent = agents.find((a) => a.id === agentId);
+      const connected = agent?.state === "connected";
+
       const row = document.createElement("div");
       row.className = "device";
-      row.dataset["state"] = agent.state;
-
-      const name = document.createElement("span");
-      name.className = "device-name";
-      name.textContent = agent.name;
-
+      row.dataset["state"] = agent?.state ?? "offline";
       const dot = document.createElement("span");
       dot.className = "dot";
-      dot.title = agent.state;
-
+      dot.title = agent?.state ?? "offline";
+      const name = document.createElement("span");
+      name.className = "device-name";
+      name.textContent = agent?.name ?? agentId;
       const newShell = document.createElement("button");
       newShell.textContent = "+ shell";
-      newShell.disabled = agent.state !== "connected";
-      newShell.addEventListener("click", () => void openShell(agent.id, agent.name));
-
+      newShell.disabled = !connected;
+      newShell.addEventListener("click", () => void openShell(agentId, agent?.name ?? agentId));
       row.append(dot, name, newShell);
       deviceList.append(row);
-    }
-  }
 
-  async function openShell(agentId: string, agentName: string): Promise<void> {
-    try {
-      const session = await client.createSession(agentId, { kind: "pty" });
-      const pane = new TerminalPane(client, agentId, session.id, `${agentName} · ${session.title}`);
-      panes.set(session.id, pane);
-      grid.append(pane.el);
-      pane.refit();
-    } catch (err) {
-      statusText.textContent = `could not open shell: ${String(err)}`;
+      for (const s of sessions.filter((x) => x.agentId === agentId)) {
+        const item = document.createElement("div");
+        item.className = "session";
+        item.draggable = true;
+        item.dataset["visible"] = String(s.visible);
+        item.dataset["focused"] = String(s.focused);
+        const stitle = document.createElement("span");
+        stitle.className = "session-title";
+        stitle.textContent = s.title.replace(/^.*·\s*/, ""); // "shell N" (device shown above)
+        const kill = document.createElement("button");
+        kill.className = "session-kill";
+        kill.textContent = "×";
+        kill.title = "end this session";
+        kill.addEventListener("click", (e) => {
+          e.stopPropagation();
+          client.closeSession(agentId, s.sessionId);
+          workspace.kill(s.sessionId);
+        });
+        item.append(stitle, kill);
+        item.addEventListener("click", () => workspace.show(s.sessionId));
+        item.addEventListener("dragstart", (e) => {
+          e.dataTransfer?.setData(SESSION_MIME, s.sessionId);
+          if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+        });
+        deviceList.append(item);
+      }
     }
   }
 

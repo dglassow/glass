@@ -26,9 +26,12 @@ export class TerminalPane {
     private readonly agentId: string,
     readonly sessionId: string,
     title: string,
+    private readonly opts: { onClose?: () => void; onFocus?: () => void } = {},
   ) {
     this.el = document.createElement("div");
     this.el.className = "pane";
+    // Clicking anywhere in the pane focuses it (for split layouts).
+    this.el.addEventListener("mousedown", () => this.opts.onFocus?.());
 
     const header = document.createElement("div");
     header.className = "pane-header";
@@ -36,8 +39,11 @@ export class TerminalPane {
     label.textContent = title;
     const closeBtn = document.createElement("button");
     closeBtn.textContent = "✕";
-    closeBtn.title = "close session";
-    closeBtn.addEventListener("click", () => this.client.closeSession(this.agentId, this.sessionId));
+    closeBtn.title = "hide from workspace (session stays live — reopen from the sidebar)";
+    closeBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.opts.onClose?.();
+    });
     header.append(label, closeBtn);
 
     const body = document.createElement("div");
@@ -103,6 +109,21 @@ export class TerminalPane {
 
   markDead(note: string): void {
     this.term.write(`\r\n\x1b[2m[${note}]\x1b[0m\r\n`);
+  }
+
+  /** Mark this pane as the focused one in a split layout. */
+  setFocused(on: boolean): void {
+    this.el.classList.toggle("focused", on);
+  }
+
+  /** Re-fit + focus when (re)shown after being hidden. */
+  show(): void {
+    this.refit();
+    try {
+      this.term.focus();
+    } catch {
+      /* not attached */
+    }
   }
 
   refit(): void {

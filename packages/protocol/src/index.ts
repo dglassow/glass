@@ -10,3 +10,4 @@ export * from "./messages/session.js";
 export * from "./messages/system.js";
 export * from "./messages/credential.js";
 export * from "./messages/vault.js";
+export * from "./messages/proxy.js";

@@ -20,3 +20,4 @@ export const SPEAKS_PROTOCOL = PROTOCOL_VERSION;
 
 export { startAgent, type AgentOptions, type RunningAgent } from "./relay.js";
 export { startHubLink, type HubLinkOptions, type RunningHubLink } from "./hub-link.js";
+export { createSocks5Server, buildBrowserLaunch, type Socks5Options, type BrowserLaunchSpec } from "./proxy/index.js";

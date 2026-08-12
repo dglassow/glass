@@ -17,6 +17,8 @@ import {
   parseEnvelope,
   buildHandshakePayload,
   base64urlEncode,
+  randomNonce,
+  verifyHubAuth,
   PROTOCOL_VERSION,
   HUB,
   DeviceId,
@@ -57,6 +59,8 @@ export class HubClient {
   private readonly active = new Map<string, string>();
   private reconnectDelay = 250;
   private closed = false;
+  /** Fresh per-connection nonce the hub must sign when a pin is set (mutual auth). */
+  private clientNonce = "";
 
   constructor(
     private readonly url: string,
@@ -65,6 +69,13 @@ export class HubClient {
     private readonly events: HubClientEvents = {},
     /** Signs the hub's auth challenge. Injected by the container; omit for an --open hub. */
     private readonly signer?: Signer,
+    /**
+     * Pinned hub public key (mutual auth) — the hub must prove this identity or
+     * we refuse to connect. Browsers cannot export TLS keying material, so the
+     * viewer does NOT do channel binding: the hub signs its proof with cb=""
+     * and we verify with cb="". Transport confidentiality comes from wss://.
+     */
+    private readonly hubKeyPin?: string,
   ) {}
 
   connect(): void {
@@ -72,6 +83,7 @@ export class HubClient {
     const ws = new WebSocket(this.url);
     this.ws = ws;
     this.acked = false;
+    this.clientNonce = randomNonce();
 
     ws.addEventListener("open", () => {
       this.rawSend(
@@ -85,6 +97,9 @@ export class HubClient {
           protocolVersion: PROTOCOL_VERSION,
           appVersion: APP_VERSION,
           etch: { present: false },
+          // Ask the hub to prove its pinned identity. channelBinding stays
+          // false/omitted: no TLS exporter in browsers (see hubKeyPin above).
+          ...(this.hubKeyPin ? { clientNonce: this.clientNonce } : {}),
         },
       );
     });
@@ -166,7 +181,22 @@ export class HubClient {
         const signer = this.signer;
         if (signer) {
           const { nonce } = body;
+          const pin = this.hubKeyPin;
+          const hubProof = body.hub;
+          const clientNonce = this.clientNonce;
           void (async () => {
+            if (pin) {
+              // Mutual auth: the hub must prove the pinned identity BEFORE we
+              // sign anything. cb="" — the viewer does no channel binding.
+              const ok =
+                !!hubProof &&
+                hubProof.key === pin &&
+                (await verifyHubAuth(pin, this.deviceId, clientNonce, nonce, "", hubProof.signature));
+              if (!ok) {
+                this.refuseHub();
+                return;
+              }
+            }
             const signature = base64urlEncode(await signer.sign(buildHandshakePayload(this.deviceId, nonce)));
             this.rawSend(this.deviceId, HUB, { type: "hello.proof", deviceId: DeviceId.parse(this.deviceId), signature });
           })();
@@ -221,6 +251,21 @@ export class HubClient {
         break;
       default:
         break;
+    }
+  }
+
+  /**
+   * The hub failed to prove the pinned identity. This is not transient — a
+   * wrong pin (or an impostor) will never verify — so surface the failure and
+   * stop for good instead of reconnect-looping into the same refusal.
+   */
+  private refuseHub(): void {
+    this.closed = true;
+    this.events.onError?.("hub_identity", "hub identity verification failed — refusing to connect");
+    try {
+      this.ws?.close(4010, "hub identity not verified");
+    } catch {
+      /* already closed */
     }
   }
 

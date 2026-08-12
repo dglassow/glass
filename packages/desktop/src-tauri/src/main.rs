@@ -10,7 +10,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::io::{BufRead, BufReader, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{Emitter, Manager};
+use std::os::unix::fs::PermissionsExt;
 
 // ---------------------------------------------------------------------------
 // Backend process manager
@@ -108,9 +109,20 @@ fn spawn_backend(
     script: &Path,
     role: &str,
     envs: &[(&str, String)],
+    node_override: Option<&Path>,
 ) -> Result<Child, String> {
+    // A bundled (distributed) app carries its own portable node; use only that
+    // one (restoring its exec bit, which resource-copying can drop). Dev falls
+    // back to the system node candidates.
+    let candidates: Vec<String> = match node_override {
+        Some(n) => {
+            let _ = std::fs::set_permissions(n, std::fs::Permissions::from_mode(0o755));
+            vec![n.to_string_lossy().into_owned()]
+        }
+        None => NODE_CANDIDATES.iter().map(|s| s.to_string()).collect(),
+    };
     let mut last_err = None;
-    for node in NODE_CANDIDATES {
+    for node in &candidates {
         let mut cmd = Command::new(node);
         cmd.arg(script)
             .arg("--role")
@@ -151,7 +163,7 @@ fn spawn_backend(
     }
     Err(format!(
         "node not found (tried {}): {}",
-        NODE_CANDIDATES.join(", "),
+        candidates.join(", "),
         last_err.map(|e| e.to_string()).unwrap_or_default()
     ))
 }
@@ -168,6 +180,8 @@ fn start_backend_blocking(
     device_pub: Option<String>,
     hub_url: Option<String>,
     hub_pin: Option<String>,
+    script: PathBuf,
+    node_override: Option<PathBuf>,
 ) -> Result<serde_json::Value, String> {
     match role.as_str() {
         "standalone" | "hub" | "spoke" => {}
@@ -186,17 +200,12 @@ fn start_backend_blocking(
         return Err("spoke role needs hubUrl (the remote hub to join)".into());
     }
 
-    let glass_home = resolve_glass_home().ok_or_else(|| {
-        "could not locate the Glass backend (deploy/glass-backend.mjs). Set GLASS_HOME to \
-         the repo root, or keep the repo at ~/projects/glass."
-            .to_string()
-    })?;
-    let script = Path::new(&glass_home).join("deploy").join("glass-backend.mjs");
-
     // One backend at a time: reconfiguring replaces the previous role cleanly.
     kill_backend(&shared);
 
-    let mut envs: Vec<(&str, String)> = vec![("GLASS_HOME", glass_home.clone())];
+    // The launcher derives its own home from its location (SELF_DIR), so no
+    // GLASS_HOME is needed for either the dev repo or the bundled layout.
+    let mut envs: Vec<(&str, String)> = Vec::new();
     if let Some(v) = device_id {
         envs.push(("VIEWER_ID", v));
     }
@@ -210,7 +219,7 @@ fn start_backend_blocking(
         envs.push(("HUB_PIN", v));
     }
 
-    let mut child = spawn_backend(&script, &role, &envs)?;
+    let mut child = spawn_backend(&script, &role, &envs, node_override.as_deref())?;
     let (tx, rx) = mpsc::channel::<String>();
     pump_lines(child.stdout.take().expect("stdout piped"), tx.clone());
     pump_lines(child.stderr.take().expect("stderr piped"), tx);
@@ -280,6 +289,7 @@ fn start_backend_blocking(
 /// Resolves with the parsed GLASS_BACKEND_READY json: { role, hubUrl, hubKey? }.
 #[tauri::command]
 async fn start_backend(
+    app: tauri::AppHandle,
     state: tauri::State<'_, Backend>,
     role: String,
     device_id: Option<String>,
@@ -287,9 +297,14 @@ async fn start_backend(
     hub_url: Option<String>,
     hub_pin: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    let (script, node_override) = resolve_backend(&app).ok_or_else(|| {
+        "could not locate the Glass backend — neither the dev repo (set GLASS_HOME) nor a \
+         bundled backend in the app's resources was found."
+            .to_string()
+    })?;
     let shared = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        start_backend_blocking(shared, role, device_id, device_pub, hub_url, hub_pin)
+        start_backend_blocking(shared, role, device_id, device_pub, hub_url, hub_pin, script, node_override)
     })
     .await
     .map_err(|e| format!("backend launcher task failed: {e}"))?
@@ -439,6 +454,29 @@ fn resolve_glass_home() -> Option<String> {
             if has_backend(&p) {
                 return Some(p.to_string_lossy().into_owned());
             }
+        }
+    }
+    None
+}
+
+/// Resolve the backend launcher + which node runs it. Dev: the repo + system
+/// node (fast iteration; the baked/dev path only resolves on the dev machine).
+/// Distributed: the self-contained backend bundled in the app's resources +
+/// its own portable node. Returns (launcher_script, Some(bundled_node)|None).
+fn resolve_backend(app: &tauri::AppHandle) -> Option<(PathBuf, Option<PathBuf>)> {
+    // GLASS_PREFER_BUNDLED forces the distributed path even on a dev machine
+    // (so the bundle can be exercised where the repo would otherwise win).
+    if std::env::var_os("GLASS_PREFER_BUNDLED").is_none() {
+        if let Some(home) = resolve_glass_home() {
+            return Some((Path::new(&home).join("deploy").join("glass-backend.mjs"), None));
+        }
+    }
+    if let Ok(res) = app.path().resource_dir() {
+        let dir = res.join("backend");
+        let script = dir.join("glass-backend.mjs");
+        let node = dir.join("node");
+        if script.is_file() && node.is_file() {
+            return Some((script, Some(node)));
         }
     }
     None

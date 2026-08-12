@@ -28,6 +28,18 @@ importers:
         specifier: ^8.5.12
         version: 8.18.1
 
+  packages/backend-bundle:
+    dependencies:
+      '@glass/agent':
+        specifier: workspace:*
+        version: link:../agent
+      '@glass/hub':
+        specifier: workspace:*
+        version: link:../hub
+      '@glass/sessiond':
+        specifier: workspace:*
+        version: link:../sessiond
+
   packages/cli:
     dependencies:
       '@glass/protocol':

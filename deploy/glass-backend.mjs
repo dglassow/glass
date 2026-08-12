@@ -25,12 +25,25 @@
 import { spawn, execFileSync } from "node:child_process";
 import { mkdirSync, existsSync, writeFileSync, readFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const HOME = process.env.GLASS_HOME || new URL("../", import.meta.url).pathname;
-const HUB = `${HOME}/packages/hub/dist/main.js`.replace(/\/+/g, "/");
-const SESSIOND = `${HOME}/packages/sessiond/dist/main.js`.replace(/\/+/g, "/");
-const AGENT = `${HOME}/packages/agent/dist/main.js`.replace(/\/+/g, "/");
-const DIR = `${HOME}/config/local/desktop`.replace(/\/+/g, "/");
+const SELF_DIR = dirname(fileURLToPath(import.meta.url));
+const HOME = process.env.GLASS_HOME || join(SELF_DIR, "..");
+
+// Resolve a service main for either the dev repo (packages/<pkg>/dist) or a
+// bundled deploy (node_modules/@glass/<pkg>/dist, next to this launcher).
+function resolveMain(pkg) {
+  const cands = [join(HOME, "packages", pkg, "dist", "main.js"), join(SELF_DIR, "node_modules", "@glass", pkg, "dist", "main.js")];
+  return cands.find((c) => existsSync(c)) ?? cands[0];
+}
+const HUB = resolveMain("hub");
+const SESSIOND = resolveMain("sessiond");
+const AGENT = resolveMain("agent");
+// State (device keys, trust store) must live somewhere writable — never inside a
+// read-only .app bundle.
+const DIR = process.env.GLASS_STATE_DIR || join(homedir(), ".glass", "desktop");
 
 const roleArg = (() => {
   const i = process.argv.indexOf("--role");

@@ -1,0 +1,12 @@
+{
+  "name": "@glass/backend-bundle",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Meta-package: pulls the backend services into one deployable tree for the desktop app bundle.",
+  "dependencies": {
+    "@glass/hub": "workspace:*",
+    "@glass/sessiond": "workspace:*",
+    "@glass/agent": "workspace:*"
+  }
+}

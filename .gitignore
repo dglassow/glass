@@ -36,3 +36,7 @@ packages/desktop/src-tauri/icons/android/
 packages/desktop/src-tauri/icons/ios/
 packages/desktop/src-tauri/icons/Square*Logo.png
 packages/desktop/src-tauri/icons/StoreLogo.png
+
+# Bundled backend for the distributable app (regenerate: packages/desktop/bundle-backend.sh)
+packages/desktop/src-tauri/backend/
+packages/desktop/.node-cache/

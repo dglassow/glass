@@ -197,7 +197,7 @@ async function run() {
   // 1. sessiond + hub up. Parse the hub's ephemeral ws:// URL from stderr.
   sessiond = startProc("sessiond", [SESSIOND, "--socket", SD_SOCK], /listening on/);
   await sessiond.ready;
-  hub = startProc("hub", [HUB, "--listen", "127.0.0.1:0"], /listening on (ws:\/\/\S+)/);
+  hub = startProc("hub", [HUB, "--listen", "127.0.0.1:0", "--open"], /listening on (ws:\/\/\S+)/);
   const hubUrl = (await hub.ready)[1];
   info(`sessiond pid=${sessiond.cp.pid}, hub ${hubUrl} pid=${hub.cp.pid}`);
 

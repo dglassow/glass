@@ -21,7 +21,10 @@ export type DeviceRecord = z.infer<typeof DeviceRecord>;
 /** Enrollment: requester shows the code, an approver confirms it matches. */
 export const DeviceEnrollRequest = z.object({
   type: z.literal("device.enroll.request"),
+  deviceId: DeviceId,
   deviceName: z.string(),
+  roles: z.array(DeviceRole),
+  /** base64url of the raw 32-byte Ed25519 public key. */
   publicKey: z.string(),
   verificationCode: z.string().length(6),
 });
@@ -41,7 +44,13 @@ export const DeviceEnrollDecision = z.object({
   type: z.literal("device.enroll.decision"),
   requestId: z.string(),
   approved: z.boolean(),
-  /** Which device approved, or absent when authorized by Hub credentials. */
+  /**
+   * The approver's echo of the code shown on the requesting device. The hub
+   * REQUIRES it when approved is true — this is what makes number matching
+   * enforceable on the wire rather than only in the approver's UI.
+   */
+  verificationCode: z.string().length(6).optional(),
+  /** Which device approved. Set by the hub from the socket identity, never trusted from the wire. */
   approvedBy: DeviceId.optional(),
 });
 export type DeviceEnrollDecision = z.infer<typeof DeviceEnrollDecision>;

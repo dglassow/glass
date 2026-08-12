@@ -15,6 +15,8 @@
 import {
   makeEnvelope,
   parseEnvelope,
+  buildHandshakePayload,
+  base64urlEncode,
   PROTOCOL_VERSION,
   HUB,
   DeviceId,
@@ -24,6 +26,7 @@ import {
   type DeviceRecord,
   type SessionRecord,
   type SessionKind,
+  type Signer,
 } from "@glass/protocol";
 
 const APP_VERSION = "0.0.0";
@@ -60,6 +63,8 @@ export class HubClient {
     private readonly deviceId: string,
     private readonly deviceName: string,
     private readonly events: HubClientEvents = {},
+    /** Signs the hub's auth challenge. Injected by the container; omit for an --open hub. */
+    private readonly signer?: Signer,
   ) {}
 
   connect(): void {
@@ -157,6 +162,17 @@ export class HubClient {
     const body = env.body;
 
     if (!this.acked) {
+      if (body.type === "hello.challenge") {
+        const signer = this.signer;
+        if (signer) {
+          const { nonce } = body;
+          void (async () => {
+            const signature = base64urlEncode(await signer.sign(buildHandshakePayload(this.deviceId, nonce)));
+            this.rawSend(this.deviceId, HUB, { type: "hello.proof", deviceId: DeviceId.parse(this.deviceId), signature });
+          })();
+        }
+        return;
+      }
       if (body.type === "hello.ack") {
         this.acked = true;
         this.reconnectDelay = 250;

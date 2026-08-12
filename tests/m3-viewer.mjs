@@ -102,7 +102,7 @@ async function run() {
 
   sessiond = startProc("sessiond", [SESSIOND, "--socket", SD_SOCK], /listening on/);
   await sessiond.ready;
-  hub = startProc("hub", [HUB, "--listen", "127.0.0.1:0"], /listening on (ws:\/\/\S+)/);
+  hub = startProc("hub", [HUB, "--listen", "127.0.0.1:0", "--open"], /listening on (ws:\/\/\S+)/);
   const hubUrl = (await hub.ready)[1];
   agent1 = startProc("agent", [AGENT, "--sessiond", SD_SOCK, "--hub", hubUrl, "--device-id", "agent-pro", "--name", "Pro"], /registered with hub/);
   await agent1.ready;

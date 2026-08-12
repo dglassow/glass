@@ -11,7 +11,7 @@ Solo project, personal infrastructure. Ground-up rebuild — replaces Prism, sup
 
 ## Current state
 
-**Phase 0 complete. Phase 1 milestones 1–3 done (backend + viewer verified; native shell scaffolded).**
+**Phase 0 complete. Phase 1 done (1–3). Phase 2 milestone 1 (device-key auth + enrollment) done.**
 
 Done:
 - Monorepo (pnpm workspaces), `@glass/protocol` with zod schemas, version negotiation, NDJSON framing, CI
@@ -23,11 +23,13 @@ Done:
 
 Verification honesty: the backend (hub/agent/sessiond) and the Viewer's data layer are proven by `tests/` (38 checks, in CI). The xterm.js GUI compiles and bundles but is not interactively verified headlessly; the Tauri shell is a scaffold, not built here.
 
-Protocol note: M2 added `roles` + `deviceName` to `Hello` (additive; v1 is unreleased so no N-1 concern) — the registry can't populate `DeviceRecord` without them. Self-asserted while auth is stubbed; Phase 2 enrollment makes them authoritative.
+- Phase 2 M1 auth: the hub's `authorize()` stub is gone. Peers now prove key possession with an **Ed25519 challenge/response** (`hello` → `hello.challenge{nonce}` → `hello.proof{signature}` → `hello.ack`; shared isomorphic WebCrypto helpers in `protocol/src/auth.ts`), and the hub admits only deviceIds in its trust store (`hub/src/trust-store.ts`, a 0600 JSON file; SQLite in Phase 3). Stale-socket eviction happens only *after* the proof verifies, so an impostor can't DoS-evict a live device. **Enrollment with number matching** (plan §8) rides a frame-locked pre-auth lane over the existing `device.enroll.*` messages; the approver echoes the code (enforced on the wire), fail-closed on wrong code/expiry, and already-trusted ids can't be re-enrolled. Bootstrap for the first device is the marked CLI `node hub/dist/main.js trust add|list|remove` — the Q2-blocked passkey/TOTP path plugs into the same `TrustStore.add()` seam. The hub is **fail-closed**: it refuses to start without `--trust-store` or `--open`. `--open` preserves Phase 1 behavior; the M2/M3 harnesses pass `--open`. Agent gains `--key <path>` (`agent/src/keystore.ts`); the viewer's `HubClient` takes an injected `Signer`. `tests/p2m1-auth.mjs` (20 checks) proves admission, refusal of unknown/bad-sig/replayed peers (and that they can't evict a live connection), the full enroll→authenticate loop, and trust surviving a hub restart.
+
+Protocol note: M2 added `roles` + `deviceName` to `Hello`. P2-M1 added `hello.challenge`/`hello.proof`, `roles`+`deviceId` on `device.enroll.request`, `verificationCode` on `device.enroll.decision`, two enroll error codes, and `protocol/src/auth.ts`. All additive; `PROTOCOL_VERSION` stays 1 (unreleased). Deferred to later Phase 2: mutual auth / TLS + hub-key pinning (the M1 auth proves the peer holds its key, not that the channel is unhijacked — fine on loopback/tailnet), Lightsail relay, and Keychain/Secure-Enclave key storage (behind the `Signer` seam).
 
 Scope: M1–M3 prove the load-bearing decision (PTYs survive a worker swap) end-to-end, through the hub, and into the viewer client. NOT yet covered: the Phase 4 blue/green `sessiond`→`sessiond` fd handoff (SCM_RIGHTS), the hub's own blue/green restart recovery, and running the GUI on real hardware ("from Studio, run a shell on Pro" — the last step is a human running the Tauri app on a Mac).
 
-Next: close out Phase 1 by running the desktop app on a Mac, then Phase 2 (enrollment, keypairs, passkey login, relay).
+Next: Phase 2 remainder — passkey / password+TOTP bootstrap (blocked on open-question Q2, the `@simplewebauthn` spike), then the Lightsail relay + TLS with hub-key pinning / mutual auth. Also still open: run the desktop GUI on real Macs to close Phase 1's "shell on Pro".
 
 Apple code signing is complete (`Developer ID Application: Daniel Glassow (Z6ATGC7GNB)`); the notarization API key is pending but blocks nothing until Phase 4.
 

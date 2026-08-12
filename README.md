@@ -19,9 +19,12 @@ property is proven end-to-end — locally (`tests/m1-acceptance.mjs`), through t
 hub (`tests/m2-acceptance.mjs`), and in the real viewer client
 (`tests/m3-viewer.mjs`): kill and restart the worker and the shell survives with
 scrollback intact, even output produced while no worker existed; the viewer
-re-attaches on its own. 38 checks, all in CI. The xterm GUI bundles; the Tauri
-desktop shell (`packages/desktop`) is scaffolded for a Mac build. `supervisor`
-is the only remaining skeleton.
+re-attaches on its own. Phase 2 milestone 1 adds real **device-key auth**: peers
+prove key possession with an Ed25519 challenge/response and the hub admits only
+enrolled devices, with number-matching enrollment (`tests/p2m1-auth.mjs`). 58
+checks across four suites, all in CI. The xterm GUI bundles; the Tauri desktop
+shell (`packages/desktop`) is scaffolded for a Mac build. `supervisor` is the
+only remaining skeleton.
 
 ## Layout
 

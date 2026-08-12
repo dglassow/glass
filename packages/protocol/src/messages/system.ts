@@ -21,6 +21,8 @@ export const ErrorCode = z.enum([
   "device_unreachable",
   "version_incompatible",
   "rate_limited",
+  "enroll_code_mismatch",
+  "enroll_unknown_request",
   "internal",
 ]);
 export type ErrorCode = z.infer<typeof ErrorCode>;

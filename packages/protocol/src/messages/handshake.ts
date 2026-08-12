@@ -31,5 +31,27 @@ export const HelloAck = z.object({
 });
 export type HelloAck = z.infer<typeof HelloAck>;
 
-export const HandshakeMessage = z.discriminatedUnion("type", [Hello, HelloAck]);
+/**
+ * Device-key authentication (Phase 2). After a peer sends `hello`, a hub in
+ * trust mode replies with a fresh, single-use challenge; the peer signs it and
+ * replies with `hello.proof`; only then does the hub send `hello.ack`. The
+ * signed payload is defined in `auth.ts`.
+ */
+export const HelloChallenge = z.object({
+  type: z.literal("hello.challenge"),
+  /** base64url of 32 CSPRNG bytes, valid only for this connection. */
+  nonce: z.string(),
+  alg: z.literal("ed25519"),
+});
+export type HelloChallenge = z.infer<typeof HelloChallenge>;
+
+export const HelloProof = z.object({
+  type: z.literal("hello.proof"),
+  deviceId: DeviceId,
+  /** base64url of the raw 64-byte Ed25519 signature over the handshake payload. */
+  signature: z.string(),
+});
+export type HelloProof = z.infer<typeof HelloProof>;
+
+export const HandshakeMessage = z.discriminatedUnion("type", [Hello, HelloAck, HelloChallenge, HelloProof]);
 export type HandshakeMessage = z.infer<typeof HandshakeMessage>;

@@ -26,6 +26,8 @@ import {
   encodeFrame,
   makeEnvelope,
   parseEnvelope,
+  buildHandshakePayload,
+  base64urlEncode,
   DeviceId,
   SessionId,
   HUB,
@@ -33,6 +35,7 @@ import {
   type Body,
   type Envelope,
   type DeviceRole,
+  type Signer,
 } from "@glass/protocol";
 
 const APP_VERSION = "0.0.0";
@@ -44,6 +47,8 @@ export interface HubLinkOptions {
   readonly hubUrl: string;
   readonly deviceId: string;
   readonly deviceName: string;
+  /** Signs the hub's auth challenge. Omit only when the hub runs in --open mode. */
+  readonly signer?: Signer;
   readonly onRegistered?: () => void;
   readonly onSessiondClosed?: () => void;
 }
@@ -244,6 +249,30 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
       if (!res.ok) return;
       const env = res.envelope;
       if (!handshakeDone) {
+        if (env.body.type === "hello.challenge") {
+          const { nonce } = env.body;
+          const signer = opts.signer;
+          if (!signer) {
+            console.error("agent: hub requires device-key auth but no signer was provided (--key)");
+            ws.close();
+            return;
+          }
+          void (async () => {
+            const signature = base64urlEncode(await signer.sign(buildHandshakePayload(self, nonce)));
+            ws.send(
+              JSON.stringify(
+                makeEnvelope({
+                  id: randomUUID(),
+                  ts: Date.now(),
+                  from: self,
+                  to: HUB,
+                  body: { type: "hello.proof", deviceId: DeviceId.parse(self), signature },
+                }),
+              ),
+            );
+          })();
+          return;
+        }
         if (env.body.type === "hello.ack") {
           handshakeDone = true;
           reconnectDelay = RECONNECT_MIN_MS;

@@ -9,6 +9,7 @@
  */
 import { startAgent } from "./relay.js";
 import { startHubLink } from "./hub-link.js";
+import { loadOrCreateSigner } from "./keystore.js";
 
 interface Args {
   sessiond: string;
@@ -16,6 +17,7 @@ interface Args {
   hub: string | null;
   deviceId: string;
   name: string;
+  key: string | null;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -24,6 +26,7 @@ function parseArgs(argv: string[]): Args {
   let hub: string | null = null;
   let deviceId = "";
   let name = "";
+  let key: string | null = null;
   for (let i = 0; i < argv.length; i++) {
     switch (argv[i]) {
       case "--sessiond": sessiond = argv[++i] ?? ""; break;
@@ -31,12 +34,13 @@ function parseArgs(argv: string[]): Args {
       case "--hub": hub = argv[++i] ?? ""; break;
       case "--device-id": deviceId = argv[++i] ?? ""; break;
       case "--name": name = argv[++i] ?? ""; break;
+      case "--key": key = argv[++i] ?? ""; break;
     }
   }
-  if (!sessiond) throw new Error("usage: agent --sessiond <path> (--listen <sock> | --hub <url> --device-id <id> [--name <name>])");
+  if (!sessiond) throw new Error("usage: agent --sessiond <path> (--listen <sock> | --hub <url> --device-id <id> [--name <name>] [--key <path>])");
   if (!listen && !hub) throw new Error("agent needs at least one of --listen or --hub");
   if (hub && !deviceId) throw new Error("--hub requires --device-id");
-  return { sessiond, listen, hub, deviceId, name: name || deviceId };
+  return { sessiond, listen, hub, deviceId, name: name || deviceId, key };
 }
 
 async function main(): Promise<void> {
@@ -55,11 +59,13 @@ async function main(): Promise<void> {
   }
 
   if (args.hub) {
+    const signer = args.key ? await loadOrCreateSigner(args.key, args.deviceId) : undefined;
     await startHubLink({
       sessiondPath: args.sessiond,
       hubUrl: args.hub,
       deviceId: args.deviceId,
       deviceName: args.name,
+      ...(signer ? { signer } : {}),
       onSessiondClosed: () => {
         console.error("agent: sessiond connection closed; exiting");
         process.exit(0);

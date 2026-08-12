@@ -49,6 +49,7 @@ import { Passkey, responseCredentialId } from "./passkey.js";
 import type { Vault } from "./vault/vault.js";
 import type { GitStore } from "./git/git-store.js";
 import { createGitHttpHandler } from "./git/git-http.js";
+import { createStaticHandler } from "./web-static.js";
 
 const APP_VERSION = "0.0.0";
 const HANDSHAKE_TIMEOUT_MS = 5000;
@@ -111,6 +112,8 @@ export interface HubServerOptions {
   hubSigner?: Signer;
   /** Git hosting for spokes (plan §13/Phase 7). Served over the same TLS listener under /git/. */
   gitStore?: GitStore;
+  /** Viewer PWA build output (plan §5). Served over the same TLS listener, after the git route. */
+  webRoot?: string;
 }
 
 function rawToString(raw: RawData): string {
@@ -138,16 +141,18 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
   const wss = opts.tls
     ? new WebSocketServer({ server: (httpsServer = createHttpsServer({ cert: opts.tls.cert, key: opts.tls.key })), maxPayload: MAX_PAYLOAD_BYTES })
     : new WebSocketServer({ host, port: opts.port ?? 0, maxPayload: MAX_PAYLOAD_BYTES });
-  // Git hosting (Phase 7) shares the TLS listener under /git/. Only plain HTTP
-  // requests reach 'request' (WS upgrades are handled separately), so anything
-  // not handled by the git route is a 404. Auth + ACL live in the handler.
-  if (httpsServer && opts.gitStore) {
-    const gitHandler = createGitHttpHandler(opts.gitStore);
+  // Git hosting (Phase 7) and the viewer PWA (plan §5) share the TLS listener.
+  // Only plain HTTP requests reach 'request' (WS upgrades are handled
+  // separately). Route order matters: git first (/git/ auth + ACL live in that
+  // handler), then static files, then 404 for anything neither claimed.
+  if (httpsServer && (opts.gitStore || opts.webRoot)) {
+    const gitHandler = opts.gitStore ? createGitHttpHandler(opts.gitStore) : null;
+    const staticHandler = opts.webRoot ? createStaticHandler(opts.webRoot) : null;
     httpsServer.on("request", (req, res) => {
-      if (!gitHandler(req, res)) {
-        res.writeHead(404, { "content-type": "text/plain" });
-        res.end("not found");
-      }
+      if (gitHandler && gitHandler(req, res)) return;
+      if (staticHandler && staticHandler(req, res)) return;
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("not found");
     });
   }
   if (httpsServer) httpsServer.listen(opts.port ?? 0, host);

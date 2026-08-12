@@ -4,6 +4,11 @@
  *   node dist/main.js --listen 127.0.0.1:0 --trust-store <path> [--enroll-ttl-ms <n>]
  *   node dist/main.js --listen 127.0.0.1:0 --open           # Phase 1 behavior, no auth
  *
+ * Viewer PWA (plan §5): --web-root <dir> serves the viewer's dist-web build
+ * over the TLS listener (requires --tls-cert/--tls-key), alongside the
+ * WebSocket endpoint and /git/. The git route wins for /git/ paths; unknown
+ * extensionless paths fall back to index.html for client-side routing.
+ *
  * Fail-closed: refuses to start with neither --trust-store nor --open.
  *
  * Bootstrap CLI (the marked M1 stand-in for the Q2 passkey/TOTP path):
@@ -11,7 +16,7 @@
  *   node dist/main.js trust list   --trust-store <p>
  *   node dist/main.js trust remove --trust-store <p> --device-id <id>
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { isValidPublicKey, DeviceRole } from "@glass/protocol";
 import { startHubServer } from "./server.js";
 import { FileTrustStore } from "./trust-store.js";
@@ -267,6 +272,19 @@ async function runServer(argv: string[]): Promise<void> {
     gitConfig = { gitStore: new GitStore(gitRoot) };
   }
 
+  // Optional viewer PWA (plan §5: "PWA served by the Hub"). --web-root points
+  // at the viewer's dist-web build output (built separately); it is served over
+  // the same TLS listener as the WebSocket endpoint and /git/, after the git
+  // route. Requires TLS: service workers and installable PWAs need HTTPS.
+  const webRoot = flag(argv, "--web-root");
+  let webConfig = {};
+  if (webRoot) {
+    if (open) throw new Error("--web-root cannot be combined with --open (the --open listener has no TLS, so nothing would be served)");
+    if (!(tlsCert && tlsKey)) throw new Error("--web-root requires TLS (--tls-cert/--tls-key); the PWA is served only over the TLS listener");
+    if (!statSync(webRoot, { throwIfNoEntry: false })?.isDirectory()) throw new Error(`--web-root ${webRoot} is not a directory`);
+    webConfig = { webRoot };
+  }
+
   const hub = await startHubServer(
     open
       ? { host, port, mode: "open" }
@@ -281,9 +299,11 @@ async function runServer(argv: string[]): Promise<void> {
           ...tlsConfig,
           ...hubSignerConfig,
           ...gitConfig,
+          ...webConfig,
         },
   );
   if (gitRoot) console.error(`hub: git hosting enabled from ${gitRoot} (served under /git/)`);
+  if (webRoot) console.error(`hub: serving viewer PWA from ${webRoot}`);
   console.error(`hub: listening on ${hub.url} (pid ${process.pid}, ${open ? "OPEN — no auth" : "trust mode"})`);
   if (credStorePath) console.error(`hub: passkey bootstrap enabled (rpID=${rpID})`);
   if (open) console.error("hub: WARNING running in --open mode; device-key auth is disabled");

@@ -710,3 +710,96 @@ button.tset-done {
   color: var(--accent);
 }
 button.tset-done:hover { background: #1d2536; }
+
+/* ---- mobile / PWA (<720px): sidebar becomes a slide-out drawer ---------- */
+
+/* Desktop: the drawer chrome doesn't exist. Both are position:fixed when
+   shown, so they never participate in the desktop grid. */
+.menu-toggle,
+.drawer-backdrop { display: none; }
+
+@media (max-width: 720px) {
+  /* On a phone there is no transparent Tauri window — paint opaque. */
+  body { background: var(--bg); }
+
+  /* Workspace fills the screen; the sidebar overlays as a drawer. */
+  #app { grid-template-columns: 1fr; }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(300px, 85vw);
+    z-index: 40;
+    transform: translateX(-105%);
+    transition: transform 0.18s ease;
+    box-shadow: 12px 0 32px rgba(0, 0, 0, 0.45);
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  #app.drawer-open .sidebar { transform: translateX(0); }
+
+  .drawer-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    background: rgba(4, 6, 10, 0.55);
+  }
+  #app.drawer-open .drawer-backdrop { display: block; }
+
+  /* Hamburger: fixed in the top-left, above the drawer so it also closes it. */
+  .menu-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    top: calc(6px + env(safe-area-inset-top));
+    left: calc(6px + env(safe-area-inset-left));
+    z-index: 50;
+    width: 44px;
+    height: 44px;
+    font-size: 18px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    color: var(--fg);
+  }
+
+  /* Status bar sits below the hamburger inside the drawer. */
+  .status { padding-top: 14px; }
+
+  /* Touch targets ~44px; kill buttons always visible (no hover on touch). */
+  .status button.settings { min-width: 40px; min-height: 40px; }
+  .device { min-height: 44px; }
+  .device button { min-height: 36px; padding: 6px 12px; }
+  .session { min-height: 44px; margin-left: 18px; padding: 8px 10px; }
+  .session-kill { opacity: 1; min-width: 36px; min-height: 36px; }
+
+  /* Panes stack instead of tiling side-by-side; leave room for the hamburger
+     and the iOS status bar. */
+  .grid { grid-template-columns: 1fr; }
+  .workspace { padding-top: env(safe-area-inset-top); }
+  .pane-header { min-height: 40px; padding-left: 58px; }
+
+  /* Onboarding / connect / settings panels fit small screens. */
+  .connect,
+  .onboard { padding: 12px; padding-top: calc(12px + env(safe-area-inset-top)); }
+  .connect-panel { padding: 20px 16px 22px; }
+  .onboard-panel { padding: 22px 18px 24px; }
+  /* 16px inputs stop iOS Safari from zooming the page on focus. */
+  .connect-panel input { font-size: 16px; padding: 10px 12px; }
+  .role-cards { grid-template-columns: 1fr; }
+  .connect-panel .connect-go,
+  .role-card { min-height: 44px; }
+  button.connect-go,
+  button.connect-back { min-height: 44px; }
+
+  .tset-overlay { padding: 12px; padding-top: calc(12px + env(safe-area-inset-top)); }
+  .tset-panel { max-height: calc(100dvh - 24px - env(safe-area-inset-top)); padding: 16px 14px 18px; }
+  .tset-label { flex: 0 0 88px; }
+  .tset-row { min-height: 40px; }
+  .tset-seg button,
+  button.tset-done,
+  button.tset-reset { min-height: 40px; }
+}

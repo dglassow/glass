@@ -63,6 +63,15 @@ async function main(): Promise<void> {
     /* bridge unavailable — plain browser */
   }
 
+  // PWA tier: register the service worker only when this bundle is served over
+  // http(s) in a real browser — the Tauri shell must never run one (it loads
+  // from its own scheme and manages its own bundle).
+  if (!isNative() && "serviceWorker" in navigator && /^https?:$/.test(location.protocol)) {
+    void navigator.serviceWorker.register("/sw.js").catch(() => {
+      /* SW is progressive enhancement — the app works without it */
+    });
+  }
+
   // Dev convenience: ?hub= connects straight to that hub for this load,
   // without touching the stored role.
   const fromQuery = new URLSearchParams(location.search).get("hub");
@@ -76,6 +85,18 @@ async function main(): Promise<void> {
   }
 
   const role = storedRole();
+
+  // PWA tier: when the viewer is SERVED (by the hub, not the desktop shell)
+  // and nothing is configured yet, default the hub connection to the serving
+  // origin so an installed home-screen app just connects. A stored role or
+  // hub config (e.g. a browser used as a spoke) still wins, and the desktop
+  // role flow below is untouched.
+  if (!role && !isNative() && !loadHubConfig() && /^https?:$/.test(location.protocol)) {
+    const hubUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`;
+    startApp(app, identity, { hubUrl });
+    return;
+  }
+
   if (!role) {
     showOnboarding(app, { onPick: (r) => pickRole(app, identity, r, false) });
     return;
@@ -397,7 +418,21 @@ function startApp(app: HTMLElement, identity: DeviceIdentity, config: HubConfig,
   currentClient = client;
 
   workspace = new Workspace(client, () => renderSidebar());
-  app.append(sidebar, workspace.el);
+
+  // Mobile (<720px, style.css): the sidebar becomes a slide-out drawer. The
+  // hamburger + backdrop are display:none on desktop and position:fixed, so
+  // they never affect the desktop grid layout.
+  const menuBtn = document.createElement("button");
+  menuBtn.className = "menu-toggle";
+  menuBtn.textContent = "☰";
+  menuBtn.title = "sessions";
+  menuBtn.setAttribute("aria-label", "toggle session sidebar");
+  menuBtn.addEventListener("click", () => app.classList.toggle("drawer-open"));
+  const backdrop = document.createElement("div");
+  backdrop.className = "drawer-backdrop";
+  backdrop.addEventListener("click", () => app.classList.remove("drawer-open"));
+
+  app.append(sidebar, workspace.el, menuBtn, backdrop);
 
   async function refreshDevices(): Promise<void> {
     try {
@@ -425,6 +460,7 @@ function startApp(app: HTMLElement, identity: DeviceIdentity, config: HubConfig,
       const session = await client.createSession(agentId, { kind: "pty" });
       workspace.add(session.id, agentId, `${agentName} · shell ${n}`);
       workspace.show(session.id); // switch to the new shell
+      app.classList.remove("drawer-open"); // mobile: reveal the new shell
       renderSidebar();
     } catch (err) {
       statusText.textContent = `could not open shell: ${String(err)}`;
@@ -483,7 +519,10 @@ function startApp(app: HTMLElement, identity: DeviceIdentity, config: HubConfig,
           workspace.kill(s.sessionId);
         });
         item.append(stitle, kill);
-        item.addEventListener("click", () => workspace.show(s.sessionId));
+        item.addEventListener("click", () => {
+          workspace.show(s.sessionId);
+          app.classList.remove("drawer-open"); // mobile: close the drawer
+        });
         item.addEventListener("dragstart", (e) => {
           e.dataTransfer?.setData(SESSION_MIME, s.sessionId);
           if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";

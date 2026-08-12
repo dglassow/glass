@@ -27,7 +27,8 @@ import { HubClient } from "./hub-client.js";
 import { TerminalPane } from "./terminal-pane.js";
 import { loadOrCreateIdentity, loadHubConfig, saveHubConfig, type DeviceIdentity, type HubConfig } from "./auth.js";
 import { showOnboarding, type Role } from "./onboarding.js";
-import { isNative, startBackend, stopBackend, onReconfigure } from "./native.js";
+import { isNative, startBackend, stopBackend, onReconfigure, onSettings } from "./native.js";
+import { openTerminalSettings } from "./settings-ui.js";
 import type { DeviceRecord } from "@glass/protocol";
 import "@xterm/xterm/css/xterm.css";
 import "./style.css";
@@ -51,6 +52,13 @@ async function main(): Promise<void> {
   // File menu → "Reconfigure…" (desktop shell event). Harmless in a browser.
   try {
     onReconfigure(() => void reconfigure(app, identity));
+  } catch {
+    /* bridge unavailable — plain browser */
+  }
+
+  // File menu → "Terminal Settings…" (desktop shell event). No-op in a browser.
+  try {
+    onSettings(() => openTerminalSettings());
   } catch {
     /* bridge unavailable — plain browser */
   }
@@ -302,6 +310,13 @@ function startApp(app: HTMLElement, identity: DeviceIdentity, config: HubConfig,
   status.className = "status";
   const statusText = document.createElement("span");
   statusText.className = "status-text";
+  const termPrefsBtn = document.createElement("button");
+  termPrefsBtn.className = "settings";
+  termPrefsBtn.textContent = "Aa";
+  termPrefsBtn.title = "terminal settings (fonts, colours, background)";
+  termPrefsBtn.addEventListener("click", () => {
+    openTerminalSettings();
+  });
   const settingsBtn = document.createElement("button");
   settingsBtn.className = "settings";
   settingsBtn.textContent = "⚙";
@@ -309,7 +324,7 @@ function startApp(app: HTMLElement, identity: DeviceIdentity, config: HubConfig,
   settingsBtn.addEventListener("click", () => {
     void reconfigure(app, identity);
   });
-  status.append(statusText, settingsBtn);
+  status.append(statusText, termPrefsBtn, settingsBtn);
   sidebar.append(status);
 
   // Hub role: surface the hub identity key unobtrusively so the operator can

@@ -412,8 +412,15 @@ fn main() {
             // role setup via the glass://reconfigure event.
             let reconfigure =
                 MenuItemBuilder::with_id("reconfigure", "Reconfigure…").build(app)?;
+            // Standard macOS Preferences slot (app menu, Cmd+,). Opens the
+            // viewer's Terminal Settings panel via the glass://settings event.
+            let settings = MenuItemBuilder::with_id("settings", "Terminal Settings…")
+                .accelerator("CmdOrCtrl+,")
+                .build(app)?;
             let app_menu = SubmenuBuilder::new(app, "Glass")
                 .about(None)
+                .separator()
+                .item(&settings)
                 .separator()
                 .hide()
                 .hide_others()
@@ -431,10 +438,18 @@ fn main() {
                 .build()?;
             app.set_menu(menu)?;
             app.on_menu_event(|app_handle, event| {
-                if event.id().as_ref() == "reconfigure" {
-                    // Target the main window; the viewer subscribes via
-                    // native.ts onReconfigure().
-                    let _ = app_handle.emit_to("main", "glass://reconfigure", ());
+                match event.id().as_ref() {
+                    "reconfigure" => {
+                        // Target the main window; the viewer subscribes via
+                        // native.ts onReconfigure().
+                        let _ = app_handle.emit_to("main", "glass://reconfigure", ());
+                    }
+                    "settings" => {
+                        // Viewer subscribes via native.ts onSettings() and
+                        // opens the Terminal Settings panel.
+                        let _ = app_handle.emit_to("main", "glass://settings", ());
+                    }
+                    _ => {}
                 }
             });
             Ok(())

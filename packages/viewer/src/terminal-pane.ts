@@ -2,23 +2,24 @@
  * A single terminal pane: an xterm.js terminal bound to one session via the
  * HubClient. Output/scrollback are pushed in by the app; keystrokes and resizes
  * are pushed back out to the session. This is the only file that touches xterm.
+ *
+ * Appearance is driven by settings.ts: the terminal renders transparent over a
+ * `.pane-bg` layer that carries the user's colour/image/opacity, so all of the
+ * customisation (opacity, background image, fonts, colours) applies live and
+ * never bleeds onto the text.
  */
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import type { HubClient } from "./hub-client.js";
-
-const THEME = {
-  background: "#0b0e14",
-  foreground: "#bfbdb6",
-  cursor: "#e6b450",
-  selectionBackground: "#273747",
-};
+import { getSettings, onSettingsChange, xtermOptions, applyToTerminal, applyBackgroundLayer, type TerminalSettings } from "./settings.js";
 
 export class TerminalPane {
   readonly el: HTMLElement;
   private readonly term: Terminal;
   private readonly fit: FitAddon;
+  private readonly bg: HTMLElement;
   private readonly onWindowResize = (): void => this.refit();
+  private readonly unsubscribe: () => void;
 
   constructor(
     private readonly client: HubClient,
@@ -41,24 +42,34 @@ export class TerminalPane {
 
     const body = document.createElement("div");
     body.className = "pane-body";
+    // Background layer (sibling behind the terminal) carries colour/image/opacity.
+    this.bg = document.createElement("div");
+    this.bg.className = "pane-bg";
+    const mount = document.createElement("div");
+    mount.className = "pane-term";
+    body.append(this.bg, mount);
 
     this.el.append(header, body);
 
-    this.term = new Terminal({
-      convertEol: false,
-      cursorBlink: true,
-      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-      fontSize: 13,
-      theme: THEME,
-    });
+    const settings = getSettings();
+    this.term = new Terminal({ convertEol: false, ...xtermOptions(settings) });
     this.fit = new FitAddon();
     this.term.loadAddon(this.fit);
-    this.term.open(body);
+    this.term.open(mount);
+    applyBackgroundLayer(this.bg, settings);
     this.refit();
 
     this.term.onData((data) => this.client.input(this.agentId, this.sessionId, data));
     this.term.onResize(({ cols, rows }) => this.client.resize(this.agentId, this.sessionId, cols, rows));
     window.addEventListener("resize", this.onWindowResize);
+    this.unsubscribe = onSettingsChange((s) => this.applySettings(s));
+  }
+
+  private applySettings(s: TerminalSettings): void {
+    applyToTerminal(this.term, s);
+    applyBackgroundLayer(this.bg, s);
+    // Font metrics may have changed the cell size — recompute rows/cols.
+    this.refit();
   }
 
   write(data: string): void {
@@ -84,6 +95,7 @@ export class TerminalPane {
   }
 
   dispose(): void {
+    this.unsubscribe();
     window.removeEventListener("resize", this.onWindowResize);
     this.term.dispose();
     this.el.remove();

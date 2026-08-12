@@ -160,6 +160,17 @@ export function onReconfigure(cb: () => void): void {
 }
 
 /**
+ * Subscribe to the shell's "Terminal Settings…" menu item (Cmd+, — Tauri
+ * event "glass://settings"): the viewer should open its Terminal Settings
+ * panel. No-op outside the shell — a plain browser has no native menu.
+ */
+export function onSettings(cb: () => void): void {
+  const listen = tauriGlobal()?.event?.listen;
+  if (typeof listen !== "function") return;
+  void listen("glass://settings", () => cb());
+}
+
+/**
  * Launch the local browser through a SOCKS proxy with an isolated profile
  * (plan §7, Phase 6: render locally, egress from the chosen device).
  * Rejects with the shell's error string on validation or spawn failure.

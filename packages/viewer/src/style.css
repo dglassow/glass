@@ -14,13 +14,17 @@
 
 * { box-sizing: border-box; }
 
+/* The window itself stays transparent (Tauri transparent window): only the
+   CHROME (sidebar, pane headers, connect/onboarding panels) paints opaque
+   backgrounds, so lowering terminal background opacity reveals the desktop
+   behind the terminal area alone. */
 html, body, #app {
   height: 100%;
   margin: 0;
+  background: transparent;
 }
 
 body {
-  background: var(--bg);
   color: var(--fg);
   font: 13px/1.4 ui-sans-serif, -apple-system, system-ui, sans-serif;
 }
@@ -105,7 +109,7 @@ button:disabled { opacity: 0.4; cursor: default; }
   grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
   grid-auto-rows: minmax(240px, 1fr);
   gap: 1px;
-  background: var(--line);
+  background: transparent; /* see-through: pane backgrounds control opacity */
   overflow: auto;
   min-height: 0;
 }
@@ -113,7 +117,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 .pane {
   display: flex;
   flex-direction: column;
-  background: var(--bg);
+  background: transparent;
   min-height: 0;
 }
 
@@ -132,7 +136,28 @@ button:disabled { opacity: 0.4; cursor: default; }
 .pane-body {
   flex: 1;
   min-height: 0;
+  position: relative; /* anchors the background layer + terminal mount */
+}
+/* Background layer: colour / image / opacity live here, BEHIND the terminal,
+   so opacity never bleeds onto the text (and reveals the desktop when the
+   window is transparent). JS sets its background + opacity from settings. */
+.pane-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background-color: var(--bg);
+}
+.pane-term {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
   padding: 4px;
+}
+/* The terminal itself is transparent so the background layer shows through. */
+.pane-term .xterm,
+.pane-term .xterm .xterm-viewport,
+.pane-term .xterm .xterm-screen {
+  background-color: transparent !important;
 }
 
 /* ---- first-run / settings connect screen -------------------------------- */
@@ -144,6 +169,7 @@ button:disabled { opacity: 0.4; cursor: default; }
   justify-content: center;
   min-height: 100%;
   padding: 24px;
+  background: var(--bg); /* chrome stays opaque over the transparent window */
 }
 
 .connect-panel {
@@ -273,6 +299,7 @@ button.connect-back:hover:not(:disabled) {
   justify-content: center;
   min-height: 100%;
   padding: 24px;
+  background: var(--bg); /* chrome stays opaque over the transparent window */
 }
 
 .onboard-panel {
@@ -425,3 +452,190 @@ button.connect-back:hover:not(:disabled) {
   user-select: all;
 }
 .hubkey-row button { flex: none; padding: 1px 6px; font-size: 10px; }
+
+/* ---- terminal settings panel (settings-ui.ts) --------------------------- */
+
+.tset-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(4, 6, 10, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.tset-panel {
+  width: min(520px, 100%);
+  max-height: min(90vh, 720px);
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 20px 24px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+  outline: none;
+}
+
+.tset-title {
+  margin: 0;
+  font: 600 15px/1.3 var(--mono);
+  color: var(--accent);
+  letter-spacing: 0.06em;
+}
+
+.tset-section {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px 14px;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tset-section h3 {
+  margin: 0 0 2px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+
+.tset-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 26px;
+}
+
+.tset-label {
+  flex: 0 0 108px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.tset-control {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tset-control select {
+  flex: 1;
+  min-width: 0;
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 4px 8px;
+  font-size: 12px;
+  outline: none;
+}
+.tset-control select:focus { border-color: var(--accent); }
+.tset-control select:disabled { opacity: 0.4; }
+
+.tset-control input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+
+.tset-num {
+  flex: none;
+  width: 56px;
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 3px 6px;
+  font: 12px/1.4 var(--mono);
+  outline: none;
+}
+.tset-num:focus { border-color: var(--accent); }
+
+.tset-value {
+  flex: none;
+  min-width: 44px;
+  text-align: right;
+  color: var(--muted);
+  font: 11px/1.4 var(--mono);
+}
+
+.tset-color {
+  flex: none;
+  width: 40px;
+  height: 24px;
+  padding: 1px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  cursor: pointer;
+}
+.tset-color:hover { border-color: var(--accent); }
+
+.tset-seg {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.tset-seg button {
+  border: none;
+  border-radius: 0;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
+  padding: 4px 12px;
+  font-size: 12px;
+}
+.tset-seg button:last-child { border-right: none; }
+.tset-seg button:hover:not(:disabled) { color: var(--fg); border-color: var(--line); }
+.tset-seg button.active {
+  background: #1d2536;
+  color: var(--accent);
+}
+
+.tset-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg);
+  font-size: 12px;
+  cursor: pointer;
+}
+.tset-check input[type="checkbox"] { accent-color: var(--accent); }
+
+.tset-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 2px;
+}
+
+button.tset-reset {
+  background: none;
+  border-color: transparent;
+  color: var(--muted);
+  padding: 6px 10px;
+}
+button.tset-reset:hover:not(:disabled) {
+  border-color: transparent;
+  color: var(--err);
+}
+
+button.tset-done {
+  padding: 6px 22px;
+  font-size: 13px;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+button.tset-done:hover { background: #1d2536; }

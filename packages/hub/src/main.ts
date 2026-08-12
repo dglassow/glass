@@ -21,6 +21,7 @@ import { Vault, VaultError } from "./vault/vault.js";
 import { createBundle, restoreBundle } from "./vault/backup.js";
 import { loadOrCreateHubSigner } from "./hub-key.js";
 import { TunnelKeeper } from "./tunnel.js";
+import { Updater, requestSwap } from "./updater/index.js";
 
 function flag(argv: string[], name: string): string | undefined {
   const i = argv.indexOf(name);
@@ -325,12 +326,74 @@ function runTunnelCli(argv: string[]): void {
   process.on("SIGTERM", shutdown);
 }
 
+/**
+ * Self-update CLI (plan §4). `check` is a read-only decision; `stage`
+ * verifies+exports one tag; `apply` runs check → stage → ask the supervisor to
+ * blue/green swap. The pinned --allowed-signers file MUST live outside --repo,
+ * and nothing is ever swapped in that did not pass signature verification.
+ *   hub update check  --repo <clone> --allowed-signers <pinned> [--current v] [--staging d]
+ *   hub update stage  --repo <clone> --allowed-signers <pinned> --tag <vX.Y.Z> [--current v]
+ *   hub update apply  --repo <clone> --allowed-signers <pinned> --current <v> --control <sup.sock>
+ */
+async function runUpdateCli(argv: string[]): Promise<void> {
+  const action = argv[0];
+  const req = (name: string): string => {
+    const v = flag(argv, name);
+    if (!v) throw new Error(`update: ${name} is required`);
+    return v;
+  };
+  const mkUpdater = (): Updater =>
+    new Updater({
+      repoDir: req("--repo"),
+      allowedSignersPath: req("--allowed-signers"),
+      stagingRoot: flag(argv, "--staging") ?? `${req("--repo")}/.glass-staging`,
+      currentVersion: flag(argv, "--current") ?? "0.0.0",
+      ...(flag(argv, "--local-protocol") ? { localProtocol: Number(flag(argv, "--local-protocol")) } : {}),
+      ...(flag(argv, "--remote") ? { remote: flag(argv, "--remote") as string } : {}),
+    });
+  try {
+    if (action === "check") {
+      const d = mkUpdater().checkForUpdate();
+      const out =
+        d.action === "apply"
+          ? { action: d.action, tag: d.tag, version: d.version.raw, rejected: d.rejected }
+          : { action: d.action, reason: d.reason, rejected: d.rejected };
+      process.stdout.write(JSON.stringify(out) + "\n");
+    } else if (action === "stage") {
+      const s = mkUpdater().stage(req("--tag"));
+      process.stdout.write(JSON.stringify({ tag: s.tag, version: s.version, protocolVersion: s.protocolVersion, entry: s.entryPath }) + "\n");
+    } else if (action === "apply") {
+      const up = mkUpdater();
+      const d = up.checkForUpdate();
+      if (d.action !== "apply") {
+        process.stderr.write(`update: nothing to apply (${d.reason})\n`);
+        return;
+      }
+      const s = up.stage(d.tag);
+      process.stderr.write(`update: staged ${s.tag} (${s.version}, proto ${s.protocolVersion}) at ${s.entryPath}\n`);
+      const outcome = await requestSwap(req("--control"), s.entryPath);
+      for (const line of outcome.progress) process.stderr.write(`  swap: ${line}\n`);
+      if (!outcome.ok) {
+        process.stderr.write(`update: swap failed: ${outcome.error ?? "unknown"}\n`);
+        process.exit(1);
+      }
+      process.stderr.write(`update: applied ${s.version}\n`);
+    } else {
+      throw new Error(`update: unknown action "${action ?? ""}" (expected check | stage | apply)`);
+    }
+  } catch (err) {
+    process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
+    process.exit(1);
+  }
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (argv[0] === "trust") await runTrustCli(argv.slice(1));
   else if (argv[0] === "vault") runVaultCli(argv.slice(1));
   else if (argv[0] === "backup") runBackupCli(argv.slice(1));
   else if (argv[0] === "tunnel") runTunnelCli(argv.slice(1));
+  else if (argv[0] === "update") await runUpdateCli(argv.slice(1));
   else await runServer(argv);
 }
 

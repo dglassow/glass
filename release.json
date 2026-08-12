@@ -1,0 +1,6 @@
+{
+  "version": "0.1.0",
+  "protocolVersion": 1,
+  "minPeerProtocol": 1,
+  "entry": "packages/hub/dist/main.js"
+}

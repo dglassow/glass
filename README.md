@@ -21,8 +21,9 @@ hub (`tests/m2-acceptance.mjs`), and in the real viewer client
 scrollback intact, even output produced while no worker existed; the viewer
 re-attaches on its own. Phase 2 milestone 1 adds real **device-key auth**: peers
 prove key possession with an Ed25519 challenge/response and the hub admits only
-enrolled devices, with number-matching enrollment (`tests/p2m1-auth.mjs`). 58
-checks across four suites, all in CI. The xterm GUI bundles; the Tauri desktop
+enrolled devices, with number-matching enrollment (`tests/p2m1-auth.mjs`) and a
+WebAuthn **passkey** bootstrap for the first device (`tests/p2m2-passkey.mjs`).
+68 checks across five suites, all in CI. The xterm GUI bundles; the Tauri desktop
 shell (`packages/desktop`) is scaffolded for a Mac build. `supervisor` is the
 only remaining skeleton.
 

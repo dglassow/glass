@@ -39,6 +39,8 @@ import {
   type DeviceRole,
 } from "@glass/protocol";
 import type { TrustStore } from "./trust-store.js";
+import type { CredentialStore } from "./credential-store.js";
+import { Passkey, responseCredentialId } from "./passkey.js";
 
 const APP_VERSION = "0.0.0";
 const HANDSHAKE_TIMEOUT_MS = 5000;
@@ -89,6 +91,10 @@ export interface HubServerOptions {
   mode: "trust" | "open";
   trustStore?: TrustStore;
   enrollTtlMs?: number;
+  /** Passkey bootstrap (plan §8.4). All three are set together or not at all. */
+  credentialStore?: CredentialStore;
+  passkey?: Passkey;
+  registerToken?: string;
 }
 
 function rawToString(raw: RawData): string {
@@ -106,7 +112,10 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
 
   const registry = new Map<string, Entry>();
   const pendingEnrollments = new Map<string, PendingEnroll>();
+  const credentialSessions = new Set<WebSocket>();
   const liveness = new WeakMap<WebSocket, boolean>();
+  const credentialStore = opts.credentialStore;
+  const passkey = opts.passkey;
   let epochCounter = 0;
 
   const wss = new WebSocketServer({ host, port: opts.port ?? 0, maxPayload: MAX_PAYLOAD_BYTES });
@@ -139,6 +148,14 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
     }
   }
 
+  /** Pending enrollments go to authenticated devices AND passkey-authed owner sessions. */
+  function broadcastEnrollPending(body: Body): void {
+    broadcastToAuthenticated(() => body);
+    for (const socket of credentialSessions) {
+      if (socket.readyState === WebSocket.OPEN) reply(socket, "hub-credential", body);
+    }
+  }
+
   function registerAuthenticated(socket: WebSocket, pp: PendingProof): number {
     const prev = registry.get(pp.deviceId);
     if (prev && prev.socket && prev.socket !== socket) prev.socket.terminate();
@@ -164,10 +181,11 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
   }
 
   wss.on("connection", (socket) => {
-    let state: "first" | "await-proof" | "verifying" | "enroll-locked" | "registered" = "first";
+    let state: "first" | "await-proof" | "verifying" | "enroll-locked" | "cred-ceremony" | "credential-authed" | "registered" = "first";
     let deviceId: string | null = null;
     let epoch = -1;
     let pendingProof: PendingProof | null = null;
+    let credChallenge: { scope: "register" | "auth"; challenge: string; name: string } | null = null;
     liveness.set(socket, true);
     socket.on("pong", () => liveness.set(socket, true));
 
@@ -281,8 +299,106 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
           code: req.verificationCode, expiresAt, requester: socket, status: "pending", timer,
         });
         reply(socket, req.deviceId, { type: "device.enroll.pending", requestId, deviceName: req.deviceName, verificationCode: req.verificationCode, expiresAt }, env.id);
-        broadcastToAuthenticated(() => ({ type: "device.enroll.pending", requestId, deviceName: req.deviceName, verificationCode: req.verificationCode, expiresAt }));
+        broadcastEnrollPending({ type: "device.enroll.pending", requestId, deviceName: req.deviceName, verificationCode: req.verificationCode, expiresAt });
       })();
+    }
+
+    function handleCredentialBegin(env: Envelope): void {
+      if (!passkey || !credentialStore) return void socket.close(4003, "passkey not enabled");
+      const body = env.body;
+      if (body.type === "credential.register.begin") {
+        // Token-gated bootstrap: only someone with local hub access can register the first passkey.
+        if (!opts.registerToken || body.token !== opts.registerToken) return void socket.close(4007, "invalid registration token");
+        const name = body.name;
+        state = "cred-ceremony";
+        void (async () => {
+          const { options, challenge } = await passkey.registrationOptions(name);
+          credChallenge = { scope: "register", challenge, name };
+          reply(socket, "hub-credential", { type: "credential.options", scope: "register", options }, env.id);
+        })();
+        return;
+      }
+      if (body.type === "credential.auth.begin") {
+        if (credentialStore.isEmpty()) return void socket.close(4007, "no credentials registered");
+        state = "cred-ceremony";
+        void (async () => {
+          const { options, challenge } = await passkey.authenticationOptions(credentialStore.list().map((c) => c.id));
+          credChallenge = { scope: "auth", challenge, name: "" };
+          reply(socket, "hub-credential", { type: "credential.options", scope: "auth", options }, env.id);
+        })();
+        return;
+      }
+      socket.close(4003, "expected a credential ceremony frame");
+    }
+
+    function promoteToCredentialAuthed(): void {
+      credentialSessions.add(socket);
+      state = "credential-authed";
+      clearTimeout(handshakeTimer);
+    }
+
+    function handleCredentialCeremony(env: Envelope): void {
+      const chal = credChallenge;
+      if (!passkey || !credentialStore || !chal) return void refuseUnexpected();
+      const body = env.body;
+      if (chal.scope === "register" && body.type === "credential.register.finish") {
+        state = "verifying";
+        credChallenge = null;
+        void (async () => {
+          const cred = await passkey.verifyRegistration(body.response, chal.challenge, chal.name);
+          if (!cred) {
+            reply(socket, "hub-credential", { type: "credential.result", scope: "register", ok: false, message: "registration failed" }, env.id);
+            socket.close(4008, "registration failed");
+            return;
+          }
+          credentialStore.add(cred);
+          reply(socket, "hub-credential", { type: "credential.result", scope: "register", ok: true }, env.id);
+          promoteToCredentialAuthed();
+        })();
+        return;
+      }
+      if (chal.scope === "auth" && body.type === "credential.auth.finish") {
+        const credId = responseCredentialId(body.response);
+        const stored = credId ? credentialStore.get(credId) : undefined;
+        state = "verifying";
+        credChallenge = null;
+        if (!stored) {
+          reply(socket, "hub-credential", { type: "credential.result", scope: "auth", ok: false, message: "unknown credential" }, env.id);
+          socket.close(4008, "unknown credential");
+          return;
+        }
+        void (async () => {
+          const newCounter = await passkey.verifyAuthentication(body.response, chal.challenge, stored);
+          if (newCounter === null) {
+            reply(socket, "hub-credential", { type: "credential.result", scope: "auth", ok: false, message: "authentication failed" }, env.id);
+            socket.close(4008, "authentication failed");
+            return;
+          }
+          credentialStore.updateCounter(stored.id, newCounter);
+          reply(socket, "hub-credential", { type: "credential.result", scope: "auth", ok: true }, env.id);
+          promoteToCredentialAuthed();
+        })();
+        return;
+      }
+      refuseUnexpected();
+    }
+
+    function handleCredentialAuthed(env: Envelope): void {
+      if (env.to !== HUB) return;
+      const body = env.body;
+      switch (body.type) {
+        case "device.list":
+          reply(socket, "hub-credential", { type: "device.listed", devices: [...registry.values()].map((e) => e.record) }, env.id);
+          break;
+        case "device.enroll.decision":
+          handleDecision(socket, "hub-credential", env, body.requestId, body.approved, body.verificationCode);
+          break;
+        case "heartbeat":
+          reply(socket, "hub-credential", { type: "heartbeat.ack", sentAt: body.sentAt, receivedAt: Date.now() }, env.id);
+          break;
+        default:
+          break;
+      }
     }
 
     socket.on("message", (raw: RawData, isBinary: boolean) => {
@@ -301,8 +417,14 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
         case "registered":
           handleAuthenticated(socket, deviceId as string, env);
           return;
+        case "credential-authed":
+          handleCredentialAuthed(env);
+          return;
         case "await-proof":
           handleProof(env);
+          return;
+        case "cred-ceremony":
+          handleCredentialCeremony(env);
           return;
         case "verifying":
         case "enroll-locked":
@@ -311,13 +433,15 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
         case "first":
           if (env.body.type === "hello") handleHello(env);
           else if (env.body.type === "device.enroll.request") handleEnrollRequest(env);
-          else socket.close(4003, "expected hello or device.enroll.request as the first frame");
+          else if (env.body.type === "credential.register.begin" || env.body.type === "credential.auth.begin") handleCredentialBegin(env);
+          else socket.close(4003, "expected hello, device.enroll.request, or a credential ceremony");
           return;
       }
     });
 
     socket.on("close", () => {
       clearTimeout(handshakeTimer);
+      credentialSessions.delete(socket);
       // A dead enrollment requester voids its pending request (no blind approval).
       for (const [rid, pe] of pendingEnrollments) {
         if (pe.requester === socket && pe.status === "pending") {

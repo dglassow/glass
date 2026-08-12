@@ -4,6 +4,7 @@ import { HandshakeMessage } from "./messages/handshake.js";
 import { DeviceMessage } from "./messages/device.js";
 import { SessionMessage } from "./messages/session.js";
 import { SystemMessage } from "./messages/system.js";
+import { CredentialMessage } from "./messages/credential.js";
 
 /** Every message on the wire is one of these. */
 export const Body = z.union([
@@ -11,6 +12,7 @@ export const Body = z.union([
   DeviceMessage,
   SessionMessage,
   SystemMessage,
+  CredentialMessage,
 ]);
 export type Body = z.infer<typeof Body>;
 

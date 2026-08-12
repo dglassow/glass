@@ -15,7 +15,7 @@ Types: **Decide** = needs your call · **Find out** = needs a spike first · **D
 | ID | Type | Question | My lean |
 |---|---|---|---|
 | **Q1** | Do | App Store Connect API key for notarization | in progress |
-| **Q2** | Find out | Does `@simplewebauthn/server` fit the passkey flow? | verify |
+| ~~Q2~~ | ~~Find out~~ | ~~Does `@simplewebauthn/server` fit the passkey flow?~~ | **resolved ✓** |
 | **Q3** | Find out | Does Etch have a programmatic mode with structured output? | deferred |
 | **Q4** | Find out | whisper.cpp or faster-whisper, on which Mac? | spike |
 | **Q5** | Find out | Message format for streaming text + audio | design later |
@@ -33,7 +33,11 @@ You mentioned you may already have this and want a step-by-step walkthrough — 
 ---
 
 ### Q2 — Does `@simplewebauthn/server` fit the passkey flow?
-**Find out.** Fits the stack, obvious candidate, needs an hour of verification against the real login flow before you commit.
+**Resolved ✓ (Phase 2 M2).** Verified with a full headless ceremony (register +
+authenticate) on Node 25 and wired into the hub (`packages/hub/src/passkey.ts`),
+gated by `--register-token`, with a passkey session granted enrollment-approver
+capability. Proven by `tests/p2m2-passkey.mjs`. Browser-side wiring
+(`navigator.credentials` in the viewer) still needs real-device verification.
 
 ---
 

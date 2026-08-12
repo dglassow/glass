@@ -14,6 +14,8 @@
 import { isValidPublicKey, DeviceRole } from "@glass/protocol";
 import { startHubServer } from "./server.js";
 import { FileTrustStore } from "./trust-store.js";
+import { CredentialStore } from "./credential-store.js";
+import { Passkey } from "./passkey.js";
 
 function flag(argv: string[], name: string): string | undefined {
   const i = argv.indexOf(name);
@@ -70,6 +72,20 @@ async function runServer(argv: string[]): Promise<void> {
   const port = idx >= 0 ? Number(listen.slice(idx + 1)) : 0;
   if (!Number.isInteger(port) || port < 0) throw new Error(`invalid --listen ${listen}`);
 
+  // Optional passkey bootstrap (plan §8.4).
+  const credStorePath = flag(argv, "--cred-store");
+  const registerToken = flag(argv, "--register-token");
+  const rpID = flag(argv, "--rp-id") ?? "localhost";
+  const rpName = flag(argv, "--rp-name") ?? "Glass Hub";
+  const origin = flag(argv, "--origin") ?? `http://${rpID}`;
+  const credentialConfig = credStorePath
+    ? {
+        credentialStore: new CredentialStore(credStorePath),
+        passkey: new Passkey({ rpID, rpName, origin }),
+        ...(registerToken !== undefined ? { registerToken } : {}),
+      }
+    : {};
+
   const hub = await startHubServer(
     open
       ? { host, port, mode: "open" }
@@ -79,9 +95,11 @@ async function runServer(argv: string[]): Promise<void> {
           mode: "trust",
           trustStore: new FileTrustStore(storePath as string),
           ...(enrollTtl !== undefined ? { enrollTtlMs: Number(enrollTtl) } : {}),
+          ...credentialConfig,
         },
   );
   console.error(`hub: listening on ${hub.url} (pid ${process.pid}, ${open ? "OPEN — no auth" : "trust mode"})`);
+  if (credStorePath) console.error(`hub: passkey bootstrap enabled (rpID=${rpID})`);
   if (open) console.error("hub: WARNING running in --open mode; device-key auth is disabled");
 
   const shutdown = (): void => void hub.close().then(() => process.exit(0));

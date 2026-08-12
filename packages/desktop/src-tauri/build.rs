@@ -4,7 +4,13 @@ fn main() {
     // to the main window explicitly (Tauri v2 ACL).
     tauri_build::try_build(
         tauri_build::Attributes::new().app_manifest(
-            tauri_build::AppManifest::new().commands(&["launch_proxied_browser", "app_version"]),
+            tauri_build::AppManifest::new().commands(&[
+                "launch_proxied_browser",
+                "app_version",
+                "start_backend",
+                "stop_backend",
+                "backend_status",
+            ]),
         ),
     )
     .expect("failed to run tauri-build");

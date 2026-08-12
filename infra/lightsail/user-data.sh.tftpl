@@ -1,0 +1,42 @@
+# Glass relay provisioning.
+#
+# IMPORTANT: Lightsail PREPENDS its own `#!/bin/sh` init script to this
+# user_data, so the combined blob runs as a shell script — a `#cloud-config`
+# here would be executed line-by-line as shell and fail. This file is therefore
+# plain POSIX sh (no shebang, no cloud-config), appended after Lightsail's part.
+#
+# It creates the forward-only `tunnel` user, installs the hub's dedicated pubkey
+# (interpolated by Terraform from var.tunnel_ssh_pubkey — never committed), and
+# configures sshd to accept ONLY a reverse forward of :443 from that user.
+# ${tunnel_ssh_pubkey} below is a Terraform interpolation, resolved at apply.
+
+# The hub forwards :443 via `ssh -R` as the non-root tunnel user. 443 is a
+# privileged port, so sshd (running as that user) can't bind it unless we lower
+# the kernel's unprivileged-port floor. This keeps the box sshd-only — no proxy,
+# no DNAT, no Glass code — which is the whole point of the relay design.
+echo 'net.ipv4.ip_unprivileged_port_start=443' > /etc/sysctl.d/99-glass-relay.conf
+sysctl -w net.ipv4.ip_unprivileged_port_start=443
+
+id -u tunnel >/dev/null 2>&1 || useradd --system --create-home --shell /usr/sbin/nologin tunnel
+install -d -m 700 -o tunnel -g tunnel /home/tunnel/.ssh
+cat > /home/tunnel/.ssh/authorized_keys <<'GLASS_AK'
+${tunnel_ssh_pubkey}
+GLASS_AK
+chown tunnel:tunnel /home/tunnel/.ssh/authorized_keys
+chmod 600 /home/tunnel/.ssh/authorized_keys
+
+cat > /etc/ssh/sshd_config.d/glass-relay.conf <<'GLASS_SSHD'
+# Allow a client to request binding on 0.0.0.0 (needed for -R 0.0.0.0:443).
+GatewayPorts clientspecified
+Match User tunnel
+  AllowTcpForwarding remote
+  PermitListen 443
+  X11Forwarding no
+  AllowAgentForwarding no
+  PermitTTY no
+# Reset context so nothing after this drop-in inherits the tunnel Match.
+Match all
+GLASS_SSHD
+
+# Validate before restarting so a typo can't lock us out of the box.
+sshd -t && systemctl restart sshd

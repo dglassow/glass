@@ -58,4 +58,24 @@ AWS_PROFILE=<your-profile> ./tf.sh apply
    tunnel@relay.<your-domain>`.
 4. Pin the hub's public key (printed at hub startup) in each spoke's config.
 
+## How the box provisions itself (two non-obvious things)
+
+`user-data.sh.tftpl` is plain **shell, not `#cloud-config`** — on purpose.
+Lightsail prepends its own `#!/bin/sh` init script to your user_data, so the
+combined blob runs as a shell script; a `#cloud-config` would be executed
+line-by-line as shell and silently fail (`users:: command not found`). The
+script creates the forward-only `tunnel` user, installs the hub's pubkey, and
+writes the sshd drop-in.
+
+It also sets `net.ipv4.ip_unprivileged_port_start=443`. The hub opens the
+reverse forward as the **non-root** `tunnel` user, and `:443` is a privileged
+port, so without lowering the kernel's unprivileged-port floor the forward is
+refused (`remote port forwarding failed for listen port 443`). Lowering the
+floor keeps the box **sshd-only** — no proxy, no DNAT, no Glass code — which is
+the entire point of the relay design.
+
+Verify a fresh box end-to-end: from a machine holding the tunnel private key,
+`ssh -NT -R 0.0.0.0:443:127.0.0.1:<local> tunnel@<relay_ip>` and curl
+`<relay_ip>:443` — it should reach your local listener.
+
 `AWS_PROFILE=<your-profile> ./tf.sh destroy` tears it all down.

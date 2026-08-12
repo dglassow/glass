@@ -38,7 +38,9 @@ resource "aws_lightsail_instance" "relay" {
   availability_zone = "${var.region}a"
   blueprint_id      = var.blueprint_id
   bundle_id         = var.bundle_id
-  user_data         = templatefile("${path.module}/cloud-init.yaml", { tunnel_ssh_pubkey = var.tunnel_ssh_pubkey })
+  # Shell (not cloud-config): Lightsail prepends its own #!/bin/sh init script,
+  # so user_data runs as shell. See user-data.sh.tftpl for the full rationale.
+  user_data = templatefile("${path.module}/user-data.sh.tftpl", { tunnel_ssh_pubkey = var.tunnel_ssh_pubkey })
 }
 
 resource "aws_lightsail_static_ip" "relay" {
@@ -48,20 +50,34 @@ resource "aws_lightsail_static_ip" "relay" {
 resource "aws_lightsail_static_ip_attachment" "relay" {
   static_ip_name = aws_lightsail_static_ip.relay.name
   instance_name  = aws_lightsail_instance.relay.name
+
+  # The attachment's args are static strings, so replacing the instance would
+  # otherwise leave the static IP detached (the new instance would keep a dynamic
+  # IP). Tie the attachment's lifecycle to the instance's id so it re-attaches
+  # whenever the instance is recreated.
+  lifecycle {
+    replace_triggered_by = [aws_lightsail_instance.relay.id]
+  }
 }
 
 resource "aws_lightsail_instance_public_ports" "relay" {
   instance_name = aws_lightsail_instance.relay.name
 
+  # Declare the CIDRs explicitly. AWS auto-populates these defaults, so omitting
+  # them makes Terraform plan a perpetual replacement (config ≠ refreshed state).
   port_info {
-    protocol  = "tcp"
-    from_port = 22
-    to_port   = 22
+    protocol   = "tcp"
+    from_port  = 22
+    to_port    = 22
+    cidrs      = ["0.0.0.0/0"]
+    ipv6_cidrs = ["::/0"]
   }
   port_info {
-    protocol  = "tcp"
-    from_port = 443
-    to_port   = 443
+    protocol   = "tcp"
+    from_port  = 443
+    to_port    = 443
+    cidrs      = ["0.0.0.0/0"]
+    ipv6_cidrs = ["::/0"]
   }
 }
 

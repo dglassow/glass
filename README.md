@@ -23,7 +23,9 @@ re-attaches on its own. Phase 2 milestone 1 adds real **device-key auth**: peers
 prove key possession with an Ed25519 challenge/response and the hub admits only
 enrolled devices, with number-matching enrollment (`tests/p2m1-auth.mjs`) and a
 WebAuthn **passkey** bootstrap for the first device (`tests/p2m2-passkey.mjs`).
-68 checks across five suites, all in CI. The xterm GUI bundles; the Tauri desktop
+Phase 3 milestone 1 adds an encrypted **vault**: envelope encryption over
+`node:sqlite`, per-device secret scoping, and `glass run` secret injection
+(`tests/p3m1-vault.mjs`). 93 checks across six suites, all in CI. The xterm GUI bundles; the Tauri desktop
 shell (`packages/desktop`) is scaffolded for a Mac build. `supervisor` is the
 only remaining skeleton.
 
@@ -38,7 +40,7 @@ packages/
   agent/        worker: session routing and providers              (M1 relay + M2 hub bridge)
   viewer/       shared web frontend — webview on desktop, PWA on mobile (M3: xterm panes over the hub)
   desktop/      Tauri shell                                        (M3 scaffold — build on a Mac)
-  cli/          secret injection, enrollment                       (not yet built)
+  cli/          secret injection, enrollment                       (P3: glass run)
 ```
 
 ## Protocol

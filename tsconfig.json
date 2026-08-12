@@ -5,6 +5,7 @@
     { "path": "packages/supervisor" },
     { "path": "packages/sessiond" },
     { "path": "packages/agent" },
-    { "path": "packages/hub" }
+    { "path": "packages/hub" },
+    { "path": "packages/cli" }
   ]
 }

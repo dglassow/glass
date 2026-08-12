@@ -11,15 +11,153 @@
  *   node dist/main.js trust list   --trust-store <p>
  *   node dist/main.js trust remove --trust-store <p> --device-id <id>
  */
+import { readFileSync } from "node:fs";
 import { isValidPublicKey, DeviceRole } from "@glass/protocol";
 import { startHubServer } from "./server.js";
 import { FileTrustStore } from "./trust-store.js";
 import { CredentialStore } from "./credential-store.js";
 import { Passkey } from "./passkey.js";
+import { Vault, VaultError } from "./vault/vault.js";
 
 function flag(argv: string[], name: string): string | undefined {
   const i = argv.indexOf(name);
   return i >= 0 ? argv[i + 1] : undefined;
+}
+
+function flags(argv: string[], name: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < argv.length; i++) if (argv[i] === name && argv[i + 1] !== undefined) out.push(argv[i + 1] as string);
+  return out;
+}
+
+function readStdin(): string {
+  try {
+    return readFileSync(0, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Vault CLI (plan §9). Passphrases/recovery keys and secret values arrive on
+ * STDIN, never argv/env — nothing lands in shell history or `ps` output.
+ *   init:            line 1 = passphrase, line 2 = recovery key
+ *   add/update:      line 1 = passphrase, remainder to EOF = value (verbatim)
+ *   others:          line 1 = passphrase (or recovery key for check-recovery)
+ */
+function runVaultCli(argv: string[]): void {
+  const action = argv[0];
+  const dbPath = flag(argv, "--vault");
+  if (!dbPath) throw new Error("vault: --vault <db> is required");
+  const stdin = readStdin();
+  const firstLine = (): string => stdin.split("\n")[0] ?? "";
+  const afterFirstLine = (): string => {
+    const nl = stdin.indexOf("\n");
+    return nl < 0 ? "" : stdin.slice(nl + 1);
+  };
+  const name = (): string => {
+    const n = flag(argv, "--name");
+    if (!n) throw new Error("vault: --name is required");
+    return n;
+  };
+  const openUnlocked = (): Vault => {
+    const v = Vault.open(dbPath);
+    if (!v.unlock(firstLine())) {
+      v.close();
+      process.stderr.write("vault unlock failed\n");
+      process.exit(5);
+    }
+    return v;
+  };
+
+  try {
+    switch (action) {
+      case "init": {
+        const lines = stdin.split("\n");
+        Vault.init(dbPath, lines[0] ?? "", lines[1] ?? "").close();
+        process.stderr.write("vault: initialized\n");
+        break;
+      }
+      case "add": {
+        const v = openUnlocked();
+        const cls = flag(argv, "--class") === "personal" ? "personal" : "workflow";
+        v.createSecret(name(), Buffer.from(afterFirstLine(), "utf8"), cls, flags(argv, "--tag"));
+        v.close();
+        break;
+      }
+      case "update": {
+        const v = openUnlocked();
+        v.updateSecret(name(), Buffer.from(afterFirstLine(), "utf8"));
+        v.close();
+        break;
+      }
+      case "remove": {
+        const v = openUnlocked();
+        v.removeSecret(name());
+        v.close();
+        break;
+      }
+      case "reveal": {
+        const v = openUnlocked();
+        const value = v.reveal(name());
+        v.close();
+        process.stdout.write(value);
+        break;
+      }
+      case "list": {
+        const v = openUnlocked();
+        for (const s of v.list()) process.stdout.write(JSON.stringify(s) + "\n");
+        v.close();
+        break;
+      }
+      case "allow": {
+        const v = openUnlocked();
+        v.allow(name(), flag(argv, "--device-id") ?? "");
+        v.close();
+        break;
+      }
+      case "deny": {
+        const v = openUnlocked();
+        v.deny(name(), flag(argv, "--device-id") ?? "");
+        v.close();
+        break;
+      }
+      case "tag": {
+        const v = openUnlocked();
+        v.tag(name(), flag(argv, "--tag") ?? "");
+        v.close();
+        break;
+      }
+      case "untag": {
+        const v = openUnlocked();
+        v.untag(name(), flag(argv, "--tag") ?? "");
+        v.close();
+        break;
+      }
+      case "check-recovery": {
+        const v = Vault.open(dbPath);
+        const ok = v.checkRecovery(firstLine());
+        v.close();
+        process.exit(ok ? 0 : 1);
+        break;
+      }
+      case "audit": {
+        const v = Vault.open(dbPath);
+        for (const row of v.auditRows()) process.stdout.write(JSON.stringify(row) + "\n");
+        v.close();
+        break;
+      }
+      default:
+        throw new Error(`vault: unknown action "${action ?? ""}"`);
+    }
+  } catch (err) {
+    if (err instanceof VaultError) {
+      process.stderr.write(err.message + "\n");
+      const code = err.code === "weak_recovery_key" ? 3 : err.code === "already_initialized" ? 2 : err.code === "tamper" ? 8 : 1;
+      process.exit(code);
+    }
+    throw err;
+  }
 }
 
 async function runTrustCli(argv: string[]): Promise<void> {
@@ -86,6 +224,21 @@ async function runServer(argv: string[]): Promise<void> {
       }
     : {};
 
+  // Optional vault (plan §9). Requires authenticated mode; unlocked from stdin at boot.
+  const vaultPath = flag(argv, "--vault");
+  let vaultConfig = {};
+  if (vaultPath) {
+    if (open) throw new Error("--vault cannot be combined with --open (vault requires device auth)");
+    const vault = Vault.open(vaultPath);
+    const passphrase = argv.includes("--vault-passphrase-stdin") ? (readStdin().split("\n")[0] ?? "") : "";
+    if (!vault.unlock(passphrase)) {
+      console.error("vault unlock failed");
+      process.exit(1);
+    }
+    console.error("vault: unlocked (slot=passphrase)");
+    vaultConfig = { vault };
+  }
+
   const hub = await startHubServer(
     open
       ? { host, port, mode: "open" }
@@ -96,6 +249,7 @@ async function runServer(argv: string[]): Promise<void> {
           trustStore: new FileTrustStore(storePath as string),
           ...(enrollTtl !== undefined ? { enrollTtlMs: Number(enrollTtl) } : {}),
           ...credentialConfig,
+          ...vaultConfig,
         },
   );
   console.error(`hub: listening on ${hub.url} (pid ${process.pid}, ${open ? "OPEN — no auth" : "trust mode"})`);
@@ -110,6 +264,7 @@ async function runServer(argv: string[]): Promise<void> {
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (argv[0] === "trust") await runTrustCli(argv.slice(1));
+  else if (argv[0] === "vault") runVaultCli(argv.slice(1));
   else await runServer(argv);
 }
 

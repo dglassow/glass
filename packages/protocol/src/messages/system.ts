@@ -23,6 +23,10 @@ export const ErrorCode = z.enum([
   "rate_limited",
   "enroll_code_mismatch",
   "enroll_unknown_request",
+  "secret_denied",
+  "secret_unknown",
+  "vault_locked",
+  "biometric_required",
   "internal",
 ]);
 export type ErrorCode = z.infer<typeof ErrorCode>;

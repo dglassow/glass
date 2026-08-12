@@ -28,6 +28,22 @@ importers:
         specifier: ^8.5.12
         version: 8.18.1
 
+  packages/cli:
+    dependencies:
+      '@glass/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      ws:
+        specifier: ^8.18.0
+        version: 8.21.3
+    devDependencies:
+      '@types/node':
+        specifier: ^22
+        version: 22.20.1
+      '@types/ws':
+        specifier: ^8.5.12
+        version: 8.18.1
+
   packages/hub:
     dependencies:
       '@glass/protocol':

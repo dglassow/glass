@@ -41,6 +41,7 @@ import {
 import type { TrustStore } from "./trust-store.js";
 import type { CredentialStore } from "./credential-store.js";
 import { Passkey, responseCredentialId } from "./passkey.js";
+import type { Vault } from "./vault/vault.js";
 
 const APP_VERSION = "0.0.0";
 const HANDSHAKE_TIMEOUT_MS = 5000;
@@ -95,6 +96,8 @@ export interface HubServerOptions {
   credentialStore?: CredentialStore;
   passkey?: Passkey;
   registerToken?: string;
+  /** Unlocked vault for machine secret retrieval (plan §9). */
+  vault?: Vault;
 }
 
 function rawToString(raw: RawData): string {
@@ -489,6 +492,16 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
       case "device.enroll.decision":
         handleDecision(socket, deviceId, env, env.body.requestId, env.body.approved, env.body.verificationCode);
         break;
+      case "vault.get": {
+        if (!opts.vault) {
+          reply(socket, deviceId, { type: "error", code: "internal", message: "vault not enabled" }, env.id);
+          break;
+        }
+        const result = opts.vault.getForDevice(deviceId, env.body.name);
+        if (result.ok) reply(socket, deviceId, { type: "vault.secret", name: env.body.name, value: result.value.toString("utf8") }, env.id);
+        else reply(socket, deviceId, { type: "error", code: result.code, message: `vault: ${result.code}` }, env.id);
+        break;
+      }
       default:
         break;
     }

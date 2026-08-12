@@ -1,0 +1,19 @@
+{
+  "name": "@glass/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": { "glass": "./dist/main.js" },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b"
+  },
+  "dependencies": {
+    "@glass/protocol": "workspace:*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/ws": "^8.5.12"
+  }
+}

@@ -16,19 +16,31 @@ bundle (plan §4/§10).
 
 ## Apply (under your own AWS SSO session)
 
-Nothing here runs automatically — you apply it with your credentials to account
-`446121093838`:
+Nothing here runs automatically — you apply it with your own credentials. The
+account-specific bits (state bucket name, tunnel pubkey) live in **gitignored**
+files, never in this repo.
 
 ```bash
-aws sso login --profile <your-profile>        # your session, not mine
-export AWS_PROFILE=<your-profile>
+# 0. Log into your Identity Center session (profile assumes an admin role):
+aws sso login --sso-session <your-sso-session>
 
-# The hub's dedicated tunnel key (generate once, keep the private key on the hub):
-ssh-keygen -t ed25519 -f ~/.glass/tunnel_key -N "" -C glass-tunnel
+# 1. Point the backend at your account (copy the template, fill in the bucket):
+cp backend.hcl.example backend.hcl        # gitignored; bucket = glass-tfstate-<ACCOUNT_ID>
 
-cd infra/lightsail
-terraform init
-terraform apply -var="tunnel_ssh_pubkey=$(cat ~/.glass/tunnel_key.pub)"
+# 2. Create the state backend once (S3 bucket + DynamoDB lock table). Idempotent:
+AWS_PROFILE=<your-profile> ./bootstrap.sh
+
+# 3. The hub's dedicated tunnel key (generate once, keep the PRIVATE key on the
+#    hub — e.g. config/local/, which is gitignored). The pubkey is auto-loaded
+#    for terraform via a gitignored *.auto.tfvars:
+ssh-keygen -t ed25519 -f ../../config/local/tunnel_ed25519 -N "" -C glass-hub-tunnel
+printf 'tunnel_ssh_pubkey = "%s"\n' "$(cat ../../config/local/tunnel_ed25519.pub)" > tunnel.auto.tfvars
+
+# 4. Init + apply. ./tf.sh wraps terraform to feed it short-lived SSO creds
+#    (terraform 1.5's S3 backend can't read the modern sso_session profile):
+AWS_PROFILE=<your-profile> terraform init -backend-config=backend.hcl
+AWS_PROFILE=<your-profile> ./tf.sh plan
+AWS_PROFILE=<your-profile> ./tf.sh apply
 # note the output relay_ip
 ```
 
@@ -46,4 +58,4 @@ terraform apply -var="tunnel_ssh_pubkey=$(cat ~/.glass/tunnel_key.pub)"
    tunnel@relay.<your-domain>`.
 4. Pin the hub's public key (printed at hub startup) in each spoke's config.
 
-`terraform destroy` tears it all down.
+`AWS_PROFILE=<your-profile> ./tf.sh destroy` tears it all down.

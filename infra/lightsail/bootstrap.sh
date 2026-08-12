@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 PROFILE="${AWS_PROFILE:-glass}"
-hcl() { grep -E "^\s*$1\s*=" backend.hcl | sed -E 's/.*=\s*"?([^"]+)"?.*/\1/' | tr -d '[:space:]'; }
+hcl() { grep -E "^[[:space:]]*$1[[:space:]]*=" backend.hcl | sed -E 's/.*=[[:space:]]*"?([^"]+)"?.*/\1/' | tr -d '[:space:]'; }
 
 BUCKET="$(hcl bucket)"
 TABLE="$(hcl dynamodb_table)"

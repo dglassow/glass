@@ -7,9 +7,20 @@
  * Both bridge down to sessiond over --sessiond. Meant to be launched (and
  * blue/green-swapped) by the supervisor; runnable by hand and for the tests.
  */
+import { writeSync } from "node:fs";
 import { startAgent } from "./relay.js";
 import { startHubLink } from "./hub-link.js";
 import { loadOrCreateSigner } from "./keystore.js";
+
+/** Report supervised-worker status on fd 3 (a pipe the supervisor reads). Best-effort. */
+function statusLine(supervised: boolean, line: string): void {
+  if (!supervised) return;
+  try {
+    writeSync(3, line + "\n");
+  } catch {
+    /* fd 3 not present */
+  }
+}
 
 interface Args {
   sessiond: string;
@@ -18,6 +29,7 @@ interface Args {
   deviceId: string;
   name: string;
   key: string | null;
+  supervised: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -27,6 +39,7 @@ function parseArgs(argv: string[]): Args {
   let deviceId = "";
   let name = "";
   let key: string | null = null;
+  let supervised = false;
   for (let i = 0; i < argv.length; i++) {
     switch (argv[i]) {
       case "--sessiond": sessiond = argv[++i] ?? ""; break;
@@ -35,12 +48,13 @@ function parseArgs(argv: string[]): Args {
       case "--device-id": deviceId = argv[++i] ?? ""; break;
       case "--name": name = argv[++i] ?? ""; break;
       case "--key": key = argv[++i] ?? ""; break;
+      case "--supervised": supervised = true; break;
     }
   }
-  if (!sessiond) throw new Error("usage: agent --sessiond <path> (--listen <sock> | --hub <url> --device-id <id> [--name <name>] [--key <path>])");
+  if (!sessiond) throw new Error("usage: agent --sessiond <path> (--listen <sock> | --hub <url> --device-id <id> [--name <name>] [--key <path>] [--supervised])");
   if (!listen && !hub) throw new Error("agent needs at least one of --listen or --hub");
   if (hub && !deviceId) throw new Error("--hub requires --device-id");
-  return { sessiond, listen, hub, deviceId, name: name || deviceId, key };
+  return { sessiond, listen, hub, deviceId, name: name || deviceId, key, supervised };
 }
 
 async function main(): Promise<void> {
@@ -60,17 +74,36 @@ async function main(): Promise<void> {
 
   if (args.hub) {
     const signer = args.key ? await loadOrCreateSigner(args.key, args.deviceId) : undefined;
-    await startHubLink({
+    const link = await startHubLink({
       sessiondPath: args.sessiond,
       hubUrl: args.hub,
       deviceId: args.deviceId,
       deviceName: args.name,
       ...(signer ? { signer } : {}),
+      onRegistered: () => statusLine(args.supervised, "READY"),
       onSessiondClosed: () => {
+        statusLine(args.supervised, "FAILED sessiond-closed");
         console.error("agent: sessiond connection closed; exiting");
         process.exit(0);
       },
     });
+
+    if (args.supervised) {
+      // Newline commands from the supervisor on stdin (protocol-free).
+      let buf = "";
+      process.stdin.on("data", (chunk: Buffer) => {
+        buf += chunk.toString("utf8");
+        let nl: number;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const cmd = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (cmd === "standby") link.standby();
+          else if (cmd === "resume") link.resume();
+          else if (cmd === "drain") void link.close().then(() => process.exit(0));
+        }
+      });
+      process.stdin.resume();
+    }
     console.error(`agent: hub mode as ${args.deviceId}, bridging ${args.hub} <-> ${args.sessiond} (pid ${process.pid})`);
   }
 }

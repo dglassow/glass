@@ -25,9 +25,11 @@ enrolled devices, with number-matching enrollment (`tests/p2m1-auth.mjs`) and a
 WebAuthn **passkey** bootstrap for the first device (`tests/p2m2-passkey.mjs`).
 Phase 3 milestone 1 adds an encrypted **vault**: envelope encryption over
 `node:sqlite`, per-device secret scoping, `glass run` secret injection, and an
-encrypted **backup bundle** that survives the wipe-and-restore recovery drill
-(`tests/p3m1-vault.mjs`, `tests/p3m2-backup.mjs`). 102 checks across seven suites,
-all in CI. The xterm GUI bundles; the Tauri desktop
+encrypted **backup bundle** that survives the wipe-and-restore recovery drill.
+Phase 4 milestone 1 makes the `supervisor` real: a **blue/green worker swap**
+that health-checks the new worker before retiring the old, with shells running
+untouched throughout (`tests/p4m1-swap.mjs`). 111 checks across eight suites, all
+in CI. The xterm GUI bundles; the Tauri desktop
 shell (`packages/desktop`) is scaffolded for a Mac build. `supervisor` is the
 only remaining skeleton.
 
@@ -36,7 +38,7 @@ only remaining skeleton.
 ```
 packages/
   protocol/     the wire contract — everything depends on this, and on nothing else shared
-  supervisor/   lifecycle tier, rarely updated                     (skeleton)
+  supervisor/   lifecycle tier, rarely updated                     (P4: blue/green swap)
   sessiond/     owns PTYs, survives updates                        (M1: PTY over socket)
   hub/          registry, auth, vault, relay, update distribution  (M2: WS registry + relay)
   agent/        worker: session routing and providers              (M1 relay + M2 hub bridge)

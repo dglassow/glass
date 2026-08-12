@@ -55,6 +55,10 @@ export interface HubLinkOptions {
 
 export interface RunningHubLink {
   readonly close: () => Promise<void>;
+  /** Park the hub link (blue on standby during a blue/green swap). */
+  readonly standby: () => void;
+  /** Un-park and reconnect (rollback if the green worker failed). */
+  readonly resume: () => void;
 }
 
 async function connectSessiond(path: string, attempts = 30, delayMs = 100): Promise<net.Socket> {
@@ -89,6 +93,7 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
 
   let hub: WebSocket | null = null;
   let closed = false;
+  let parked = false;
   let reconnectDelay = RECONNECT_MIN_MS;
 
   function toSessiond(id: string, body: Body): void {
@@ -287,8 +292,10 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
     });
 
     const scheduleReconnect = (): void => {
-      if (closed) return;
       hub = null;
+      // Parked (blue on standby during a blue/green swap): stay disconnected so
+      // we don't fight the green worker's registration at the hub.
+      if (closed || parked) return;
       const delay = reconnectDelay;
       reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
       setTimeout(connectHub, delay);
@@ -309,6 +316,14 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
         sd.destroy();
         resolve();
       }),
+    standby: () => {
+      parked = true;
+      hub?.close(); // drop the hub link but keep sessiond; green will take over routing
+    },
+    resume: () => {
+      parked = false;
+      if (!hub || hub.readyState !== WebSocket.OPEN) connectHub();
+    },
   };
 }
 

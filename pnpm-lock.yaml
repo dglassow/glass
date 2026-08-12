@@ -82,7 +82,11 @@ importers:
         specifier: ^22
         version: 22.20.1
 
-  packages/supervisor: {}
+  packages/supervisor:
+    devDependencies:
+      '@types/node':
+        specifier: ^22
+        version: 22.20.1
 
   packages/viewer:
     dependencies:

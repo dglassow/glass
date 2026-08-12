@@ -9,6 +9,7 @@
  * loopback, never exposed raw. Keep it small and dependency-free.
  */
 import net from "node:net";
+import type { Duplex } from "node:stream";
 
 const VER = 0x05;
 // Reply codes (RFC 1928 §6).
@@ -20,10 +21,11 @@ const REP_CMD_UNSUPPORTED = 0x07;
 const REP_ATYP_UNSUPPORTED = 0x08;
 
 export interface Socks5Options {
-  /** Dial a destination and return the connected upstream socket. Defaults to a
+  /** Dial a destination and return the connected upstream stream. Defaults to a
    *  direct net.connect (real egress from this host). Override to route
-   *  elsewhere (e.g. over a Glass channel) or to restrict destinations. */
-  dial?: (host: string, port: number) => Promise<net.Socket>;
+   *  elsewhere (e.g. a tunnelled channel over the Glass link) or to restrict
+   *  destinations. Any Duplex works — it need not be a real socket. */
+  dial?: (host: string, port: number) => Promise<Duplex>;
   /** Optional allow-check; reject the CONNECT before dialling. */
   allow?: (host: string, port: number) => boolean;
   /** Called for observability (audit) on each CONNECT. */
@@ -117,8 +119,8 @@ async function handle(sock: net.Socket, opts: Socks5Options): Promise<void> {
   }
   opts.onConnect?.(host, port);
 
-  // 3. dial upstream (egress from this host) and pipe.
-  let upstream: net.Socket;
+  // 3. dial upstream (egress from this host, or a tunnelled channel) and pipe.
+  let upstream: Duplex;
   try {
     upstream = await (opts.dial ?? directDial)(host, port);
   } catch (e) {

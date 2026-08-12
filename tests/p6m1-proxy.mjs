@@ -16,7 +16,7 @@ const pexec = promisify(execFile);
 
 const agent = await import(new URL("../packages/agent/dist/proxy/index.js", import.meta.url).href);
 const proto = await import(new URL("../packages/protocol/dist/index.js", import.meta.url).href);
-const { createSocks5Server, buildBrowserLaunch } = agent;
+const { createSocks5Server, buildBrowserLaunch, ProxyExit, ProxyForwarder } = agent;
 const { parseEnvelope, makeEnvelope } = proto;
 
 const checks = [];
@@ -68,6 +68,25 @@ const targetPort = await listen(target);
   check("socks5: allow-gate refuses the connection", !r.ok);
   check("socks5: refused destination is never dialled", dialed === false);
   exit.close();
+}
+
+// ── cross-device tunnel: SOCKS listener ⇄ proxy.* frames ⇄ exit ⇄ target ──
+// The two halves are wired in-process here, standing in for hub routing.
+{
+  const seen = [];
+  let exit, forwarder;
+  exit = new ProxyExit((m) => forwarder.handle(m), { onOpen: (h, p) => seen.push(`${h}:${p}`) });
+  forwarder = new ProxyForwarder((m) => exit.handle(m));
+  const fport = await forwarder.listen();
+  const { stdout } = await pexec(
+    "curl",
+    ["-s", "--max-time", "8", "--socks5-hostname", `127.0.0.1:${fport}`, `http://localhost:${targetPort}/`],
+    { timeout: 10000 },
+  );
+  check("tunnel: request traverses forwarder→proxy.*→exit→target", stdout.includes(MARK), stdout.slice(0, 40));
+  check("tunnel: egress dial happened at the EXIT, not the forwarder", seen.includes(`localhost:${targetPort}`), seen.join(","));
+  forwarder.close();
+  exit.closeAll();
 }
 target.close();
 

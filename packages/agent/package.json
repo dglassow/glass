@@ -16,9 +16,11 @@
     "typecheck": "tsc -b"
   },
   "dependencies": {
-    "@glass/protocol": "workspace:*"
+    "@glass/protocol": "workspace:*",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@types/node": "^22"
+    "@types/node": "^22",
+    "@types/ws": "^8.5.12"
   }
 }

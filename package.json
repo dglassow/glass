@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b",
+    "test": "node tests/m1-acceptance.mjs && node tests/m2-acceptance.mjs",
     "clean": "tsc -b --clean && rm -rf packages/*/dist packages/*/*.tsbuildinfo"
   },
   "devDependencies": {

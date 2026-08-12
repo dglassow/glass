@@ -19,3 +19,4 @@ export const ROLE = "agent" as const;
 export const SPEAKS_PROTOCOL = PROTOCOL_VERSION;
 
 export { startAgent, type AgentOptions, type RunningAgent } from "./relay.js";
+export { startHubLink, type HubLinkOptions, type RunningHubLink } from "./hub-link.js";

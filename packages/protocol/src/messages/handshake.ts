@@ -1,10 +1,19 @@
 import { z } from "zod";
 import { DeviceId } from "../ids.js";
+import { DeviceRole } from "./device.js";
 
 /** First message on every connection. Establishes identity and version. */
 export const Hello = z.object({
   type: z.literal("hello"),
   deviceId: DeviceId,
+  /** Human-readable label for the registry (e.g. "Pro", "Studio"). */
+  deviceName: z.string(),
+  /**
+   * Roles this peer is claiming. Self-asserted while auth is stubbed (Phase 1);
+   * Phase 2 enrollment makes them authoritative. The Hub needs them to populate
+   * the registry — a viewer must be able to tell which device is an agent.
+   */
+  roles: z.array(DeviceRole),
   protocolVersion: z.number().int().positive(),
   appVersion: z.string(),
   /** Present and at what version, or absent. Glass detects Etch, never manages it. */

@@ -11,17 +11,19 @@ Solo project, personal infrastructure. Ground-up rebuild — replaces Prism, sup
 
 ## Current state
 
-**Phase 0 complete. Phase 1 milestone 1 (local loop) done.**
+**Phase 0 complete. Phase 1 milestones 1–2 done.**
 
 Done:
 - Monorepo (pnpm workspaces), `@glass/protocol` with zod schemas, version negotiation, NDJSON framing, CI
 - Process topology (`supervisor`, `sessiond`, `agent`, `hub`) with boundaries enforced by TS project references (only `protocol` is shared; `supervisor` deliberately can't import it)
-- Phase 1 M1 local loop: `sessiond` owns PTYs and exposes them over a Unix socket; `agent` is a stateless relay over protocol envelopes; a throwaway CLI client (`agent`'s `client.ts`) attaches and runs a shell. Acceptance test (`tests/m1-acceptance.mjs`) passes: SIGKILL + restart of the worker leaves the shell alive with scrollback intact, including output produced while the worker was down. `supervisor` and `hub` are still skeletons.
+- Phase 1 M1 local loop: `sessiond` owns PTYs over a Unix socket; `agent` relays over protocol envelopes; throwaway CLI client. `tests/m1-acceptance.mjs`: SIGKILL+restart of the worker leaves the shell alive with scrollback intact.
+- Phase 1 M2 Hub loop: `hub` is a WebSocket registry+relay (verbatim router; binds `from` to the handshaked identity; explicit `device_unknown`/`device_unreachable`/`unauthorized` errors; evicts a stale registration on agent restart). `agent` gains `--hub` mode: the sole address-translation boundary, with two *soft* tables (pending request→viewer, attached sessionId→Set<viewer>), always `from=agentId` toward sessiond so its `conn.peer` can't flap; multi-viewer fan-out lives here. `tests/m2-acceptance.mjs` (18 checks): a viewer runs a shell on a named agent through the hub, survives an agent SIGKILL+restart with scrollback across the outage, plus cross-viewer isolation, from-spoof rejection, and no-false-`session.exited`. Only `supervisor` is still a skeleton.
 
-Scope of what M1 proves: the load-bearing decision (PTYs survive a worker swap because they live in `sessiond`). It does NOT yet cover the Phase 4 blue/green `sessiond`→`sessiond` fd handoff (SCM_RIGHTS) — that is a different mechanism.
+Protocol note: M2 added `roles` + `deviceName` to `Hello` (additive; v1 is unreleased so no N-1 concern) — the registry can't populate `DeviceRecord` without them. Self-asserted while auth is stubbed; Phase 2 enrollment makes them authoritative.
 
-Next:
-- Phase 1 remainder: Hub + registry, desktop Viewer with panes (plan §14: "run a shell on Pro")
+Scope: M1/M2 prove the load-bearing decision (PTYs survive a worker swap) end-to-end and through the hub. NOT yet covered: the Phase 4 blue/green `sessiond`→`sessiond` fd handoff (SCM_RIGHTS), and the hub's own blue/green restart recovery.
+
+Next (Phase 1 remainder): the desktop Viewer — shared web frontend with terminal panes over the hub (plan §5/§6, §14: "run a shell on Pro").
 
 Apple code signing is complete (`Developer ID Application: Daniel Glassow (Z6ATGC7GNB)`); the notarization API key is pending but blocks nothing until Phase 4.
 

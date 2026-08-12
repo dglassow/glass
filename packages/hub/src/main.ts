@@ -18,6 +18,7 @@ import { FileTrustStore } from "./trust-store.js";
 import { CredentialStore } from "./credential-store.js";
 import { Passkey } from "./passkey.js";
 import { Vault, VaultError } from "./vault/vault.js";
+import { createBundle, restoreBundle } from "./vault/backup.js";
 
 function flag(argv: string[], name: string): string | undefined {
   const i = argv.indexOf(name);
@@ -261,10 +262,41 @@ async function runServer(argv: string[]): Promise<void> {
   process.on("SIGTERM", shutdown);
 }
 
+/** Backup bundle CLI (plan §10). Passphrase on stdin line 1. */
+function runBackupCli(argv: string[]): void {
+  const action = argv[0];
+  const passphrase = readStdin().split("\n")[0] ?? "";
+  const req = (name: string): string => {
+    const v = flag(argv, name);
+    if (!v) throw new Error(`backup: ${name} is required`);
+    return v;
+  };
+  const targets = () => ({
+    vaultDb: req("--vault"),
+    ...(flag(argv, "--trust-store") ? { trustStore: flag(argv, "--trust-store") as string } : {}),
+    ...(flag(argv, "--cred-store") ? { credStore: flag(argv, "--cred-store") as string } : {}),
+  });
+  try {
+    if (action === "create") {
+      createBundle({ ...targets(), out: req("--out"), passphrase });
+      process.stderr.write("backup: created\n");
+    } else if (action === "restore") {
+      restoreBundle({ ...targets(), in: req("--in"), passphrase });
+      process.stderr.write("backup: restored\n");
+    } else {
+      throw new Error(`backup: unknown action "${action ?? ""}" (expected create | restore)`);
+    }
+  } catch (err) {
+    process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
+    process.exit(1);
+  }
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (argv[0] === "trust") await runTrustCli(argv.slice(1));
   else if (argv[0] === "vault") runVaultCli(argv.slice(1));
+  else if (argv[0] === "backup") runBackupCli(argv.slice(1));
   else await runServer(argv);
 }
 

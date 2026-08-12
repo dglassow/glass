@@ -24,8 +24,10 @@ prove key possession with an Ed25519 challenge/response and the hub admits only
 enrolled devices, with number-matching enrollment (`tests/p2m1-auth.mjs`) and a
 WebAuthn **passkey** bootstrap for the first device (`tests/p2m2-passkey.mjs`).
 Phase 3 milestone 1 adds an encrypted **vault**: envelope encryption over
-`node:sqlite`, per-device secret scoping, and `glass run` secret injection
-(`tests/p3m1-vault.mjs`). 93 checks across six suites, all in CI. The xterm GUI bundles; the Tauri desktop
+`node:sqlite`, per-device secret scoping, `glass run` secret injection, and an
+encrypted **backup bundle** that survives the wipe-and-restore recovery drill
+(`tests/p3m1-vault.mjs`, `tests/p3m2-backup.mjs`). 102 checks across seven suites,
+all in CI. The xterm GUI bundles; the Tauri desktop
 shell (`packages/desktop`) is scaffolded for a Mac build. `supervisor` is the
 only remaining skeleton.
 

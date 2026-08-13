@@ -19,6 +19,10 @@ rm -rf "$OUT"
 ( cd "$REPO" && pnpm --filter @glass/backend-bundle --node-linker=hoisted deploy --prod "$OUT" >/dev/null )
 cp "$REPO/deploy/glass-backend.mjs" "$OUT/glass-backend.mjs"
 
+# Keep only the darwin-arm64 node-pty prebuild — the Intel/Windows ones are dead
+# weight and would be extra foreign Mach-O binaries to sign for notarization.
+find "$OUT" -type d -path '*/node-pty/prebuilds/*' -maxdepth 20 | grep -v 'darwin-arm64' | xargs rm -rf 2>/dev/null || true
+
 # Portable node (official build links only /System + /usr/lib), cached.
 NODE_TGZ="$CACHE/node-$NODE_VER-darwin-arm64.tar.gz"
 if [ ! -f "$CACHE/node" ]; then

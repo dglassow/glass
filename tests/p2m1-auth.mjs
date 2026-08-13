@@ -244,14 +244,14 @@ async function run() {
   // CHECK 5/6 — full number-matching enrollment, then the enrolled device authenticates.
   const newbie = await makeIdentity("newbie");
   {
-    const code = "246813";
     const p = new Peer(url, "newbie");
     await p.opened;
-    const reqId = p.send({ type: "device.enroll.request", deviceId: "newbie", deviceName: "Newbie", roles: ["agent"], publicKey: newbie.publicKey, verificationCode: code });
+    const reqId = p.send({ type: "device.enroll.request", deviceId: "newbie", deviceName: "Newbie", roles: ["agent"], publicKey: newbie.publicKey });
     const ack = await p.waitFor((e) => e.body?.type === "device.enroll.pending" && e.replyTo === reqId, "enroll ack");
+    const code = ack.body.verificationCode; // HUB-minted, shown only to the joiner
     const requestId = ack.body.requestId;
     const bcast = await A.peer.waitFor((e) => e.body?.type === "device.enroll.pending" && e.body.requestId === requestId, "enroll broadcast");
-    check("enrollment broadcasts to authenticated devices with the code", bcast.body.verificationCode === code && bcast.body.deviceName === "Newbie");
+    check("enrollment broadcasts scope to approvers but NOT the code", bcast.body.verificationCode === undefined && bcast.body.deviceName === "Newbie" && /^\d{6}$/.test(code ?? ""));
 
     const decId = A.peer.send({ type: "device.enroll.decision", requestId, approved: true, verificationCode: code });
     const dec = await A.peer.waitFor((e) => e.body?.type === "device.enroll.decision" && e.replyTo === decId, "decision");
@@ -274,15 +274,16 @@ async function run() {
   // CHECK 7/8 — wrong code voids the request; a voided request can't be resurrected.
   {
     const xdev = await makeIdentity("xdev");
-    const code = "111222";
     const p = new Peer(url, "xdev");
     await p.opened;
-    const reqId = p.send({ type: "device.enroll.request", deviceId: "xdev", deviceName: "XDev", roles: ["agent"], publicKey: xdev.publicKey, verificationCode: code });
+    const reqId = p.send({ type: "device.enroll.request", deviceId: "xdev", deviceName: "XDev", roles: ["agent"], publicKey: xdev.publicKey });
     const ack = await p.waitFor((e) => e.body?.type === "device.enroll.pending" && e.replyTo === reqId, "xdev ack");
+    const code = ack.body.verificationCode;
     const requestId = ack.body.requestId;
     await A.peer.waitFor((e) => e.body?.type === "device.enroll.pending" && e.body.requestId === requestId, "xdev broadcast");
 
-    const badId = A.peer.send({ type: "device.enroll.decision", requestId, approved: true, verificationCode: "999999" });
+    const wrong = String((Number(code) + 1) % 1_000_000).padStart(6, "0");
+    const badId = A.peer.send({ type: "device.enroll.decision", requestId, approved: true, verificationCode: wrong });
     const err = await A.peer.waitFor((e) => e.body?.type === "error" && e.replyTo === badId, "code mismatch");
     check("wrong-code approval is rejected (enroll_code_mismatch)", err.body.code === "enroll_code_mismatch");
 
@@ -291,6 +292,25 @@ async function run() {
     check("a voided request cannot be resurrected (enroll_unknown_request)", err2.body.code === "enroll_unknown_request");
     p.close();
     void xdev;
+  }
+
+  // CHECK — a superseded enrollment (same deviceId) CLOSES the old socket, so a
+  // repeated same-id request can't leak enroll sockets to exhaust fds.
+  {
+    const kA = await makeIdentity("dup");
+    const kB = await makeIdentity("dup");
+    const a = new Peer(url, "dup");
+    await a.opened;
+    a.send({ type: "device.enroll.request", deviceId: "dup", deviceName: "Dup", roles: ["viewer"], publicKey: kA.publicKey });
+    await a.waitFor((e) => e.body?.type === "device.enroll.pending", "dup A pending");
+    const b = new Peer(url, "dup");
+    await b.opened;
+    b.send({ type: "device.enroll.request", deviceId: "dup", deviceName: "Dup", roles: ["viewer"], publicKey: kB.publicKey });
+    await b.waitFor((e) => e.body?.type === "device.enroll.pending", "dup B pending");
+    await sleep(200);
+    check("superseded same-id enroll socket is closed (no fd leak)", a.closeCode !== null, `A close=${a.closeCode}`);
+    a.close();
+    b.close();
   }
 
   // CHECK 9 — an already-trusted id cannot be re-enrolled (no key overwrite).

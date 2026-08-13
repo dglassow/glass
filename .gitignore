@@ -40,3 +40,6 @@ packages/desktop/src-tauri/icons/StoreLogo.png
 # Bundled backend for the distributable app (regenerate: packages/desktop/bundle-backend.sh)
 packages/desktop/src-tauri/backend/
 packages/desktop/.node-cache/
+
+# Built installer — distributed via GitHub Releases / iCloud, never committed
+*.dmg

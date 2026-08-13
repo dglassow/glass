@@ -24,7 +24,9 @@
 import { WebSocketServer, WebSocket, type RawData } from "ws";
 import { createServer as createHttpsServer, type Server as HttpsServer } from "node:https";
 import type { IncomingMessage } from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomInt } from "node:crypto";
+import { readFileSync, watch, type FSWatcher } from "node:fs";
+import { join } from "node:path";
 import {
   parseEnvelope,
   makeEnvelope,
@@ -41,7 +43,9 @@ import {
   type Body,
   type DeviceRecord,
   type DeviceRole,
+  type EnrollCompanion,
   type Signer,
+  MAX_ENROLL_COMPANIONS,
 } from "@glass/protocol";
 import type { TrustStore } from "./trust-store.js";
 import type { CredentialStore } from "./credential-store.js";
@@ -50,6 +54,7 @@ import type { Vault } from "./vault/vault.js";
 import type { GitStore } from "./git/git-store.js";
 import { createGitHttpHandler } from "./git/git-http.js";
 import { createStaticHandler } from "./web-static.js";
+import { createUpdatesHandler } from "./updates-http.js";
 
 const APP_VERSION = "0.0.0";
 const HANDSHAKE_TIMEOUT_MS = 5000;
@@ -57,6 +62,26 @@ const PING_INTERVAL_MS = 15000;
 const BUFFER_CAP_BYTES = 4 * 1024 * 1024;
 const MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
 const DEFAULT_ENROLL_TTL_MS = 120_000;
+// Cap concurrent pending enrollments so an unauthenticated internet client on
+// the exposed listener can't allocate unbounded pending entries or spam owner
+// devices with enroll-pending broadcasts. Normal onboarding needs only a few.
+const MAX_PENDING_ENROLLMENTS = 32;
+// Global sliding-window rate limit on the pre-auth enroll lane. Tunneled clients
+// all share the relay's source IP, so per-IP throttling can't distinguish them;
+// this bounds the connect→request→disconnect flood + owner-prompt fan-out.
+const ENROLL_RATE_WINDOW_MS = 10_000;
+const ENROLL_RATE_MAX = 12;
+
+/** Hub-minted 6-digit verification code (CSPRNG) — the joiner never chooses it. */
+function genEnrollCode(): string {
+  return randomInt(0, 1_000_000).toString().padStart(6, "0");
+}
+
+/** Enrollment never grants the privileged "hub" role; fall back to a safe default. */
+function clampEnrollRoles(roles: DeviceRole[], fallback: DeviceRole): DeviceRole[] {
+  const r = roles.filter((x) => x !== "hub");
+  return r.length ? r : [fallback];
+}
 
 interface Entry {
   socket: WebSocket | null;
@@ -80,6 +105,7 @@ interface PendingEnroll {
   deviceName: string;
   roles: DeviceRole[];
   publicKey: string;
+  companions: EnrollCompanion[];
   code: string;
   expiresAt: number;
   requester: WebSocket;
@@ -87,10 +113,39 @@ interface PendingEnroll {
   timer: ReturnType<typeof setTimeout>;
 }
 
-export interface HubServer {
+export interface HubListener {
+  /** ws:// or wss:// URL this listener is bound to. */
   readonly url: string;
+  readonly port: number;
+  readonly tls: boolean;
+}
+
+export interface HubServer {
+  /** First listener's URL (back-compat; equals listeners[0].url). */
+  readonly url: string;
+  /** Every bound listener, in the order requested. */
+  readonly listeners: HubListener[];
   readonly deviceCount: () => number;
   readonly close: () => Promise<void>;
+}
+
+/**
+ * One listener the hub binds. A hub may run several at once, all sharing the
+ * same registry + trust + auth handler: e.g. a plaintext loopback ws:// for the
+ * local viewer (no cert) alongside a TLS wss:// exposed over the relay for
+ * remote spokes and the PWA. Channel binding is per-connection, so only the TLS
+ * listener's sockets bind to the exporter; loopback sockets get cb="".
+ */
+export interface ListenerSpec {
+  host?: string;
+  port?: number;
+  tls?: { cert: string; key: string };
+  /** Git hosting under /git/ (TLS listeners only). */
+  gitStore?: GitStore;
+  /** Viewer PWA static root, after the git route (TLS listeners only). */
+  webRoot?: string;
+  /** Desktop auto-update artifacts served under /updates/ (TLS listeners only). */
+  updatesRoot?: string;
 }
 
 export interface HubServerOptions {
@@ -114,6 +169,14 @@ export interface HubServerOptions {
   gitStore?: GitStore;
   /** Viewer PWA build output (plan §5). Served over the same TLS listener, after the git route. */
   webRoot?: string;
+  /** Desktop auto-update artifacts (latest.json + signed .app.tar.gz) under /updates/. */
+  updatesRoot?: string;
+  /**
+   * Additional listeners beyond the primary (host/port/tls/gitStore/webRoot).
+   * All share this hub's registry, trust store, and auth handler. Used to run a
+   * loopback ws:// for the local viewer next to a TLS wss:// over the relay.
+   */
+  listeners?: ListenerSpec[];
 }
 
 function rawToString(raw: RawData): string {
@@ -124,38 +187,22 @@ function rawToString(raw: RawData): string {
 }
 
 export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
-  const host = opts.host ?? "127.0.0.1";
   const enrollTtlMs = opts.enrollTtlMs ?? DEFAULT_ENROLL_TTL_MS;
   const trustStore = opts.trustStore;
   if (opts.mode === "trust" && !trustStore) throw new Error("trust mode requires a trust store");
 
   const registry = new Map<string, Entry>();
   const pendingEnrollments = new Map<string, PendingEnroll>();
+  const enrollWindow: number[] = []; // recent enroll-request timestamps (rate limit)
   const credentialSessions = new Set<WebSocket>();
   const liveness = new WeakMap<WebSocket, boolean>();
   const credentialStore = opts.credentialStore;
   const passkey = opts.passkey;
   let epochCounter = 0;
 
-  let httpsServer: HttpsServer | undefined;
-  const wss = opts.tls
-    ? new WebSocketServer({ server: (httpsServer = createHttpsServer({ cert: opts.tls.cert, key: opts.tls.key })), maxPayload: MAX_PAYLOAD_BYTES })
-    : new WebSocketServer({ host, port: opts.port ?? 0, maxPayload: MAX_PAYLOAD_BYTES });
-  // Git hosting (Phase 7) and the viewer PWA (plan §5) share the TLS listener.
-  // Only plain HTTP requests reach 'request' (WS upgrades are handled
-  // separately). Route order matters: git first (/git/ auth + ACL live in that
-  // handler), then static files, then 404 for anything neither claimed.
-  if (httpsServer && (opts.gitStore || opts.webRoot)) {
-    const gitHandler = opts.gitStore ? createGitHttpHandler(opts.gitStore) : null;
-    const staticHandler = opts.webRoot ? createStaticHandler(opts.webRoot) : null;
-    httpsServer.on("request", (req, res) => {
-      if (gitHandler && gitHandler(req, res)) return;
-      if (staticHandler && staticHandler(req, res)) return;
-      res.writeHead(404, { "content-type": "text/plain" });
-      res.end("not found");
-    });
-  }
-  if (httpsServer) httpsServer.listen(opts.port ?? 0, host);
+  // Listeners are created after the connection handler is defined (see the
+  // multi-listener build near the end of this function). They all share the
+  // registry/trust/auth state closed over here.
 
   /** TLS-exporter channel binding for this connection, or "" (no TLS / spoke opted out). */
   function channelBinding(request: IncomingMessage, wants: boolean): string {
@@ -196,6 +243,41 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
     }
   }
 
+  // Live "update available" signal. Read the served manifest's version and push
+  // it to each viewer on auth + whenever latest.json changes, so a running spoke
+  // learns a new build is out without reconnecting. Advisory only — the install
+  // itself stays minisign-gated on the device, so a bogus version at worst
+  // triggers a no-op update check. --tls-listen puts updatesRoot on the listener
+  // spec, so resolve from either place.
+  const updatesDir = opts.updatesRoot ?? opts.listeners?.find((l) => l.updatesRoot !== undefined)?.updatesRoot;
+  let latestUpdateVersion: string | undefined;
+  let updatesWatcher: FSWatcher | undefined;
+  function readManifestVersion(): string | undefined {
+    if (!updatesDir) return undefined;
+    try {
+      const v = (JSON.parse(readFileSync(join(updatesDir, "latest.json"), "utf8")) as { version?: unknown }).version;
+      return typeof v === "string" && v.length > 0 && v.length <= 64 ? v : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  if (updatesDir) {
+    latestUpdateVersion = readManifestVersion();
+    try {
+      updatesWatcher = watch(updatesDir, (_evt, filename) => {
+        if (filename && filename !== "latest.json") return;
+        const v = readManifestVersion();
+        if (v && v !== latestUpdateVersion) {
+          latestUpdateVersion = v;
+          broadcastToAuthenticated(() => ({ type: "update.available", version: v }));
+        }
+      });
+      updatesWatcher.unref();
+    } catch {
+      /* fs.watch unsupported here — connect-time push (registerAuthenticated) still works */
+    }
+  }
+
   /** Pending enrollments go to authenticated devices AND passkey-authed owner sessions. */
   function broadcastEnrollPending(body: Body): void {
     broadcastToAuthenticated(() => body);
@@ -225,10 +307,13 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
       pp.helloId,
     );
     broadcastToAuthenticated(() => ({ type: "device.state", device: record }));
+    // Tell the freshly-authed device if a newer build is already published, so a
+    // spoke that connects after a release still learns to nag (not only on live change).
+    if (latestUpdateVersion) reply(socket, pp.deviceId, { type: "update.available", version: latestUpdateVersion });
     return epoch;
   }
 
-  wss.on("connection", (socket, request: IncomingMessage) => {
+  function onConnection(socket: WebSocket, request: IncomingMessage): void {
     let state: "first" | "await-proof" | "verifying" | "enroll-locked" | "cred-ceremony" | "credential-authed" | "registered" = "first";
     let deviceId: string | null = null;
     let epoch = -1;
@@ -332,20 +417,53 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
         socket.close(4007, "already enrolled");
         return;
       }
+      // Rate-limit the pre-auth lane (sliding window; all tunneled clients share
+      // the relay IP) plus the concurrent-pending cap.
+      const now = Date.now();
+      while (enrollWindow.length && (enrollWindow[0] ?? 0) < now - ENROLL_RATE_WINDOW_MS) enrollWindow.shift();
+      if (enrollWindow.length >= ENROLL_RATE_MAX || pendingEnrollments.size >= MAX_PENDING_ENROLLMENTS) {
+        reply(socket, req.deviceId, { type: "error", code: "rate_limited", message: "too many enrollments; try again shortly" }, env.id);
+        socket.close(4013, "enroll rate/pending cap");
+        return;
+      }
+      enrollWindow.push(now);
       state = "enroll-locked"; // frame-lock synchronously; no self-approval, no second frame
+      // The enroll socket never reaches "registered", so the 5s handshake
+      // watchdog would force-close it (and void the pending) long before an
+      // approver can act. Cancel it; the enrollment TTL now bounds this socket.
+      clearTimeout(handshakeTimer);
+      const companionsIn = req.companions ?? []; // already capped by the schema (.max)
+      const clientNonce = req.clientNonce;
       void (async () => {
         if (!(await isValidPublicKey(req.publicKey))) {
           socket.close(4008, "invalid public key");
           return;
         }
+        // Roles are clamped to strip the privileged "hub" role (the escalation),
+        // so a joiner can never self-grant hub. Companions must be distinct valid
+        // keys, not the hub or the requester itself.
+        const reqRoles = clampEnrollRoles(req.roles, "viewer");
+        const companions: EnrollCompanion[] = [];
+        for (const c of companionsIn) {
+          if (c.deviceId === HUB || c.deviceId === req.deviceId || !(await isValidPublicKey(c.publicKey))) {
+            socket.close(4008, "invalid companion");
+            return;
+          }
+          companions.push({ deviceId: c.deviceId, publicKey: c.publicKey, roles: clampEnrollRoles(c.roles, "agent") });
+        }
         for (const [rid, pe] of pendingEnrollments) {
           if (pe.deviceId === req.deviceId) {
             clearTimeout(pe.timer);
             pendingEnrollments.delete(rid);
+            // Close the superseded socket too. With the handshake watchdog cleared
+            // and pre-auth sockets absent from the liveness ping, nothing else
+            // would ever reap it — leaving a leaked fd per dedup (DoS).
+            if (pe.requester !== socket) pe.requester.close(4001, "enrollment superseded");
           }
         }
         const requestId = randomUUID();
         const expiresAt = Date.now() + enrollTtlMs;
+        const code = genEnrollCode(); // HUB mints it — never the joiner
         const timer = setTimeout(() => {
           const pe = pendingEnrollments.get(requestId);
           pendingEnrollments.delete(requestId);
@@ -356,11 +474,21 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
         }, enrollTtlMs);
         (timer as { unref?: () => void }).unref?.();
         pendingEnrollments.set(requestId, {
-          deviceId: req.deviceId, deviceName: req.deviceName, roles: req.roles, publicKey: req.publicKey,
-          code: req.verificationCode, expiresAt, requester: socket, status: "pending", timer,
+          deviceId: req.deviceId, deviceName: req.deviceName, roles: reqRoles, publicKey: req.publicKey,
+          companions, code, expiresAt, requester: socket, status: "pending", timer,
         });
-        reply(socket, req.deviceId, { type: "device.enroll.pending", requestId, deviceName: req.deviceName, verificationCode: req.verificationCode, expiresAt }, env.id);
-        broadcastEnrollPending({ type: "device.enroll.pending", requestId, deviceName: req.deviceName, verificationCode: req.verificationCode, expiresAt });
+        // To the JOINER only: the code (shown on its screen) + the hub's identity
+        // proof so it can verify it's talking to the pinned hub on this lane too.
+        let hubProof: { key: string; signature: string } | undefined;
+        if (opts.hubSigner && clientNonce) {
+          const sig = base64urlEncode(await opts.hubSigner.sign(buildHubAuthPayload(req.deviceId, clientNonce, "enroll", "")));
+          hubProof = { key: opts.hubSigner.publicKey, signature: sig };
+        }
+        reply(socket, req.deviceId, { type: "device.enroll.pending", requestId, deviceName: req.deviceName, expiresAt, verificationCode: code, ...(hubProof ? { hubProof } : {}) }, env.id);
+        // To APPROVERS: WHAT will be trusted (roles + companion keys) but NEVER
+        // the code — a human must read it off the joining device and type it, so a
+        // compromised device that gets the broadcast still cannot self-approve.
+        broadcastEnrollPending({ type: "device.enroll.pending", requestId, deviceName: req.deviceName, expiresAt, roles: reqRoles, companions });
       })();
     }
 
@@ -523,7 +651,7 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
     socket.on("error", () => {
       /* 'close' follows */
     });
-  });
+  }
 
   function handleAuthenticated(socket: WebSocket, deviceId: string, env: Envelope): void {
     if (env.from !== deviceId) {
@@ -549,6 +677,14 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
         break;
       case "device.enroll.decision":
         handleDecision(socket, deviceId, env, env.body.requestId, env.body.approved, env.body.verificationCode);
+        break;
+      case "session.created":
+      case "session.exited":
+        // An agent announced a change to its session set (a new shell opened, or
+        // one exited). Fan it out to every connected device so all viewers keep a
+        // live, fleet-wide session list — not just the viewer that opened it. The
+        // record carries deviceId, so viewers know which agent it belongs to.
+        broadcastToAuthenticated(() => env.body);
         break;
       case "vault.get": {
         if (!opts.vault) {
@@ -600,6 +736,16 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
       trustStore!.add(pe.deviceId, {
         publicKey: pe.publicKey, name: pe.deviceName, roles: pe.roles, enrolledAt: Date.now(), approvedBy: approverId,
       });
+      // Trust the companions under the same approval (e.g. the joining Mac's
+      // shell agent alongside its viewer). Name them distinctly so they show up
+      // separately in device.list and can be revoked independently.
+      for (const c of pe.companions) {
+        if (!trustStore!.has(c.deviceId)) {
+          trustStore!.add(c.deviceId, {
+            publicKey: c.publicKey, name: `${pe.deviceName} · agent`, roles: c.roles, enrolledAt: Date.now(), approvedBy: approverId,
+          });
+        }
+      }
       pe.status = "approved";
       reply(pe.requester, pe.deviceId, { type: "device.enroll.decision", requestId, approved: true, approvedBy: DeviceId.parse(approverId) });
       pe.requester.close(1000, "enrolled");
@@ -633,21 +779,101 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
   }, PING_INTERVAL_MS);
   pingTimer.unref();
 
-  const listenTarget = httpsServer ?? wss;
+  // Build every listener from the primary opts plus any extras, all wired to the
+  // same onConnection handler (shared registry/trust/auth). Route order on a TLS
+  // listener's plain-HTTP requests: git (/git/ auth+ACL), then static PWA, then 404.
+  const primarySpec: ListenerSpec = {
+    ...(opts.host !== undefined ? { host: opts.host } : {}),
+    ...(opts.port !== undefined ? { port: opts.port } : {}),
+    ...(opts.tls !== undefined ? { tls: opts.tls } : {}),
+    ...(opts.gitStore !== undefined ? { gitStore: opts.gitStore } : {}),
+    ...(opts.webRoot !== undefined ? { webRoot: opts.webRoot } : {}),
+    ...(opts.updatesRoot !== undefined ? { updatesRoot: opts.updatesRoot } : {}),
+  };
+  const specs: ListenerSpec[] = [primarySpec, ...(opts.listeners ?? [])];
+
+  interface Built {
+    wss: WebSocketServer;
+    httpsServer: HttpsServer | undefined;
+    host: string;
+    declaredPort: number | undefined;
+    tls: boolean;
+  }
+  const built: Built[] = specs.map((spec) => {
+    const lhost = spec.host ?? "127.0.0.1";
+    let httpsServer: HttpsServer | undefined;
+    const w = spec.tls
+      ? new WebSocketServer({ server: (httpsServer = createHttpsServer({ cert: spec.tls.cert, key: spec.tls.key })), maxPayload: MAX_PAYLOAD_BYTES })
+      : new WebSocketServer({ host: lhost, port: spec.port ?? 0, maxPayload: MAX_PAYLOAD_BYTES });
+    if (httpsServer) {
+      // Bound the HTTP request phase (slow-header/slow-body slowloris) and total
+      // connections. These apply to the request phase only — an upgraded WS relay
+      // socket is unaffected — and artifact flood/slow-read is capped separately in
+      // the /updates/ handler, so a file-serving abuse can't starve the relay.
+      httpsServer.maxConnections = 1024;
+      httpsServer.headersTimeout = 15_000;
+      httpsServer.requestTimeout = 30_000;
+    }
+    if (httpsServer && (spec.gitStore || spec.webRoot || spec.updatesRoot)) {
+      const gitHandler = spec.gitStore ? createGitHttpHandler(spec.gitStore) : null;
+      const updatesHandler = spec.updatesRoot ? createUpdatesHandler(spec.updatesRoot) : null;
+      const staticHandler = spec.webRoot ? createStaticHandler(spec.webRoot) : null;
+      httpsServer.on("request", (req, res) => {
+        if (gitHandler && gitHandler(req, res)) return;
+        if (updatesHandler && updatesHandler(req, res)) return;
+        if (staticHandler && staticHandler(req, res)) return;
+        res.writeHead(404, { "content-type": "text/plain" });
+        res.end("not found");
+      });
+    }
+    w.on("connection", onConnection);
+    if (httpsServer) httpsServer.listen(spec.port ?? 0, lhost);
+    return { wss: w, httpsServer, host: lhost, declaredPort: spec.port, tls: !!spec.tls };
+  });
+
   return new Promise<HubServer>((resolve, reject) => {
-    listenTarget.once("error", reject);
-    listenTarget.once("listening", () => {
-      const addr = (httpsServer ?? wss).address();
-      const port = typeof addr === "object" && addr !== null ? addr.port : (opts.port ?? 0);
-      resolve({
-        url: `${opts.tls ? "wss" : "ws"}://${host}:${port}`,
-        deviceCount: () => registry.size,
-        close: () =>
-          new Promise<void>((res) => {
-            clearInterval(pingTimer);
-            for (const entry of registry.values()) entry.socket?.close();
-            wss.close(() => (httpsServer ? httpsServer.close(() => res()) : res()));
-          }),
+    const listeners: HubListener[] = new Array(built.length);
+    let remaining = built.length;
+    let settled = false;
+    const fail = (e: Error): void => {
+      if (settled) return;
+      settled = true;
+      // Best-effort teardown of anything that did bind before the failure — mirror
+      // close() so a startup failure doesn't leave the ping timer or fs.watch handle.
+      clearInterval(pingTimer);
+      updatesWatcher?.close();
+      for (const b of built) {
+        try { b.wss.close(); b.httpsServer?.close(); } catch { /* ignore */ }
+      }
+      reject(e);
+    };
+    built.forEach((b, i) => {
+      const target = b.httpsServer ?? b.wss;
+      target.once("error", fail);
+      target.once("listening", () => {
+        const addr = (b.httpsServer ?? b.wss).address();
+        const port = typeof addr === "object" && addr !== null ? addr.port : (b.declaredPort ?? 0);
+        listeners[i] = { url: `${b.tls ? "wss" : "ws"}://${b.host}:${port}`, port, tls: b.tls };
+        if (--remaining !== 0 || settled) return;
+        settled = true;
+        resolve({
+          url: listeners[0]!.url,
+          listeners,
+          deviceCount: () => registry.size,
+          close: () =>
+            new Promise<void>((res) => {
+              clearInterval(pingTimer);
+              updatesWatcher?.close();
+              for (const entry of registry.values()) entry.socket?.close();
+              let closing = built.length;
+              const done = (): void => {
+                if (--closing === 0) res();
+              };
+              for (const b2 of built) {
+                b2.wss.close(() => (b2.httpsServer ? b2.httpsServer.close(() => done()) : done()));
+              }
+            }),
+        });
       });
     });
   });

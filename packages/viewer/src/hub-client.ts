@@ -26,10 +26,20 @@ import {
   type Body,
   type Envelope,
   type DeviceRecord,
+  type DeviceRole,
+  type EnrollCompanion,
   type SessionRecord,
   type SessionKind,
   type Signer,
 } from "@glass/protocol";
+
+/** Lets an untrusted device self-enroll (number match) instead of failing. */
+export interface EnrollConfig {
+  deviceName: string;
+  roles: DeviceRole[];
+  /** Extra keys trusted under the same approval (e.g. this Mac's shell agent). */
+  companions: EnrollCompanion[];
+}
 
 const APP_VERSION = "0.0.0";
 
@@ -42,7 +52,23 @@ export interface HubClientEvents {
   onScrollback?: (sessionId: string, scrollback: string) => void;
   onOutput?: (sessionId: string, data: string, seq: number) => void;
   onExited?: (sessionId: string, exitCode: number | null, signal: string | null) => void;
+  /** A session (possibly on another device) was created somewhere in the fleet. */
+  onSessionAppeared?: (session: SessionRecord) => void;
   onError?: (code: string, message: string) => void;
+  /** The hub reports a build available at its update origin. Advisory: the UI
+   *  compares it to the running app version and may nag. Install stays gated. */
+  onUpdateAvailable?: (version: string) => void;
+  // --- enrollment (self-serve device join) ---
+  /** Joining device: our request is pending — display this 6-digit code. */
+  onEnrollWaiting?: (code: string) => void;
+  /** Joining device: approved — the client reconnects as a trusted device. */
+  onEnrollApproved?: () => void;
+  /** Joining device: declined or expired. */
+  onEnrollDenied?: (reason: string) => void;
+  /** Approver device: another device wants to join. Shows what will be granted
+   *  (device name, roles, companion keys); the human types the code they read
+   *  off the JOINING device's screen (the code is never broadcast to approvers). */
+  onEnrollRequest?: (req: { requestId: string; deviceName: string; roles: DeviceRole[]; companions: EnrollCompanion[] }) => void;
 }
 
 interface Pending {
@@ -61,6 +87,9 @@ export class HubClient {
   private closed = false;
   /** Fresh per-connection nonce the hub must sign when a pin is set (mutual auth). */
   private clientNonce = "";
+  /** Enrollment (self-serve join): active when this device isn't trusted yet. */
+  private enrolling = false;
+  private enrollOutcome: "none" | "approved" | "denied" = "none";
 
   constructor(
     private readonly url: string,
@@ -76,6 +105,12 @@ export class HubClient {
      * and we verify with cb="". Transport confidentiality comes from wss://.
      */
     private readonly hubKeyPin?: string,
+    /**
+     * If set, this device may self-enroll: when the hub refuses it as untrusted
+     * (close 4007), it sends a device.enroll.request (showing a 6-digit code)
+     * instead of reconnect-looping, and reconnects as trusted once approved.
+     */
+    private readonly enroll?: EnrollConfig,
   ) {}
 
   connect(): void {
@@ -86,6 +121,11 @@ export class HubClient {
     this.clientNonce = randomNonce();
 
     ws.addEventListener("open", () => {
+      // On the join path the first frame is an enroll request, not a hello.
+      if (this.enrolling) {
+        this.sendEnrollRequest();
+        return;
+      }
       this.rawSend(
         this.deviceId,
         HUB,
@@ -110,10 +150,24 @@ export class HubClient {
       if (res.ok) this.dispatch(res.envelope);
     });
 
-    ws.addEventListener("close", () => {
+    ws.addEventListener("close", (ev: CloseEvent) => {
       this.acked = false;
       this.events.onDisconnected?.();
       if (this.closed) return;
+      // 4007 = the hub refused us as untrusted. If we can self-enroll, do so
+      // (once); if we were already declined, stop looping.
+      if (ev.code === 4007 && this.enroll) {
+        if (this.enrollOutcome === "denied") {
+          this.closed = true;
+          return;
+        }
+        if (this.enrollOutcome === "none" && !this.enrolling) {
+          this.enrolling = true;
+          setTimeout(() => this.connect(), 100);
+          return;
+        }
+        // "approved" (trust just added) or already enrolling → retry a hello.
+      }
       const delay = this.reconnectDelay;
       this.reconnectDelay = Math.min(this.reconnectDelay * 2, 5000);
       setTimeout(() => this.connect(), delay);
@@ -161,6 +215,13 @@ export class HubClient {
     return env.body.session;
   }
 
+  /** Enumerate the sessions an agent currently owns (for fleet-wide discovery). */
+  async listSessions(agentId: string): Promise<SessionRecord[]> {
+    const env = await this.request(agentId, { type: "session.list" });
+    if (env.body.type !== "session.listed") throw new Error(bodyError(env, "list"));
+    return env.body.sessions;
+  }
+
   input(agentId: string, sessionId: string, data: string): void {
     this.rawSend(this.deviceId, agentId, { type: "session.input", sessionId: SessionId.parse(sessionId), data });
   }
@@ -171,10 +232,74 @@ export class HubClient {
     this.rawSend(this.deviceId, agentId, { type: "session.close", sessionId: SessionId.parse(sessionId) });
   }
 
+  /** Approver: approve a pending enrollment (echoing the matching code) or decline it. */
+  sendEnrollDecision(requestId: string, approved: boolean, code?: string): void {
+    this.rawSend(
+      this.deviceId,
+      HUB,
+      approved && code
+        ? { type: "device.enroll.decision", requestId, approved: true, verificationCode: code }
+        : { type: "device.enroll.decision", requestId, approved: false },
+    );
+  }
+
   // --- internals ---------------------------------------------------------
+
+  /** Joining device's first frame: ask to be trusted (viewer + companion agent).
+   *  The hub mints the verification code — we never choose it — and proves its
+   *  pinned identity against clientNonce before we display anything. */
+  private sendEnrollRequest(): void {
+    const cfg = this.enroll;
+    const signer = this.signer;
+    if (!cfg || !signer) return;
+    this.rawSend(this.deviceId, HUB, {
+      type: "device.enroll.request",
+      deviceId: DeviceId.parse(this.deviceId),
+      deviceName: cfg.deviceName,
+      roles: cfg.roles,
+      publicKey: signer.publicKey,
+      ...(this.hubKeyPin ? { clientNonce: this.clientNonce } : {}),
+      ...(cfg.companions.length ? { companions: cfg.companions } : {}),
+    });
+  }
 
   private dispatch(env: Envelope): void {
     const body = env.body;
+
+    // Enrollment runs pre-ack on a dedicated socket; handle its frames first.
+    if (this.enrolling) {
+      if (body.type === "device.enroll.pending") {
+        const pending = body;
+        const pin = this.hubKeyPin;
+        void (async () => {
+          // Verify the hub proved its pinned identity on THIS lane before we show
+          // a code / trust the flow — a MITM hub can't forge this signature.
+          if (pin) {
+            const proof = pending.hubProof;
+            const ok = !!proof && proof.key === pin && (await verifyHubAuth(pin, this.deviceId, this.clientNonce, "enroll", "", proof.signature));
+            if (!ok) {
+              this.enrolling = false;
+              this.enrollOutcome = "denied";
+              this.closed = true;
+              this.ws?.close();
+              this.events.onEnrollDenied?.("hub identity could not be verified");
+              return;
+            }
+          }
+          if (pending.verificationCode) this.events.onEnrollWaiting?.(pending.verificationCode);
+        })();
+      } else if (body.type === "device.enroll.decision") {
+        this.enrolling = false;
+        if (body.approved) {
+          this.enrollOutcome = "approved"; // hub closes this socket; we reconnect with hello
+          this.events.onEnrollApproved?.();
+        } else {
+          this.enrollOutcome = "denied";
+          this.events.onEnrollDenied?.("declined");
+        }
+      }
+      return;
+    }
 
     if (!this.acked) {
       if (body.type === "hello.challenge") {
@@ -227,6 +352,11 @@ export class HubClient {
     }
 
     switch (body.type) {
+      case "session.created":
+        // Unsolicited (a create reply is matched above by replyTo): a session
+        // appeared elsewhere in the fleet — surface it for the sidebar.
+        this.events.onSessionAppeared?.(body.session);
+        break;
       case "session.output":
         this.events.onOutput?.(body.sessionId, body.data, body.seq);
         break;
@@ -246,8 +376,16 @@ export class HubClient {
           }
         }
         break;
+      case "device.enroll.pending":
+        // We're trusted; another device wants to join — surface WHAT will be
+        // granted. The code isn't broadcast; the human types it from that device.
+        this.events.onEnrollRequest?.({ requestId: body.requestId, deviceName: body.deviceName, roles: body.roles ?? [], companions: body.companions ?? [] });
+        break;
       case "error":
         this.events.onError?.(body.code, body.message);
+        break;
+      case "update.available":
+        this.events.onUpdateAvailable?.(body.version);
         break;
       default:
         break;

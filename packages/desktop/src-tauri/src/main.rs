@@ -420,10 +420,14 @@ fn launch_proxied_browser(
         .map_err(|e| format!("failed to launch {binary}: {e}"))
 }
 
-/// The shell's own version (Cargo package version), for display in the viewer.
+/// The shell's own version, for display in the viewer AND for the updater's
+/// anti-rollback bookkeeping. MUST be the same version the updater compares
+/// against (tauri.conf.json > version, via generate_context!/PackageInfo) —
+/// NOT CARGO_PKG_VERSION, which is pinned at 0.0.0 in Cargo.toml and would make
+/// reconcile() think every applied update "didn't advance" and poison it.
 #[tauri::command]
-fn app_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+fn app_version(app: tauri::AppHandle) -> String {
+    app.package_info().version.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -484,6 +488,8 @@ fn resolve_backend(app: &tauri::AppHandle) -> Option<(PathBuf, Option<PathBuf>)>
 
 fn main() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(Backend::default())
         .setup(|app| {
             // Native macOS menu bar: on macOS the FIRST submenu becomes the

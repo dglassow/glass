@@ -219,6 +219,16 @@ button:disabled { opacity: 0.4; cursor: default; }
 .session:hover { background: #131826; color: var(--fg); }
 .session[data-visible="true"] { color: var(--fg); }
 .session[data-focused="true"] { background: #182031; color: var(--accent); }
+/* Discovered sessions on another device — not attached yet; click to open. */
+.session[data-remote="true"] { font-style: italic; }
+.session-hint {
+  flex: none;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  opacity: 0.7;
+}
 .session-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-kill {
   flex: none;
@@ -802,4 +812,111 @@ button.tset-done:hover { background: #1d2536; }
   .tset-seg button,
   button.tset-done,
   button.tset-reset { min-height: 40px; }
+}
+
+/* --- self-serve enrollment: join-code overlay + approval prompt --- */
+.join-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(11, 14, 20, 0.92);
+}
+.join-card {
+  background: var(--panel);
+  border: 1px solid #1c2433;
+  border-radius: 12px;
+  padding: 28px 32px;
+  max-width: 360px;
+  text-align: center;
+}
+.join-title { font-size: 15px; color: var(--fg); margin-bottom: 12px; }
+.join-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 40px;
+  letter-spacing: 0.18em;
+  color: var(--accent);
+  margin: 6px 0 14px;
+}
+.join-hint { color: var(--muted); font-size: 12px; line-height: 1.5; margin-bottom: 18px; }
+
+.enroll-approve {
+  position: fixed;
+  top: calc(16px + env(safe-area-inset-top));
+  right: 16px;
+  z-index: 60;
+  max-width: 300px;
+  padding: 16px 18px;
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+}
+.enroll-approve-title { font-size: 13px; color: var(--fg); margin-bottom: 8px; }
+.enroll-approve-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 26px;
+  letter-spacing: 0.16em;
+  color: var(--accent);
+  margin-bottom: 10px;
+}
+.enroll-approve-input {
+  width: 100%;
+  margin-bottom: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 20px;
+  letter-spacing: 0.18em;
+  text-align: center;
+}
+
+.version-foot {
+  margin-top: auto;
+  padding: 8px 12px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  opacity: 0.6;
+}
+
+.update-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 9px 16px;
+  background: #1f6feb;
+  color: #fff;
+  font-size: 13px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+.update-banner[hidden] {
+  display: none;
+}
+.update-banner-text {
+  font-weight: 500;
+}
+.update-banner-btn {
+  border: 1px solid rgba(255, 255, 255, 0.85);
+  background: transparent;
+  color: inherit;
+  border-radius: 6px;
+  padding: 4px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.update-banner-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.15);
+}
+.update-banner-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
 }

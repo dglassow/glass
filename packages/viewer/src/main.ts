@@ -23,13 +23,22 @@
  * For local development, a `?hub=` query param still connects straight to that
  * hub without touching the stored role.
  */
-import { HubClient } from "./hub-client.js";
+import { HubClient, type EnrollConfig } from "./hub-client.js";
 import { Workspace, SESSION_MIME } from "./workspace.js";
 import { loadOrCreateIdentity, loadHubConfig, saveHubConfig, type DeviceIdentity, type HubConfig } from "./auth.js";
 import { showOnboarding, type Role } from "./onboarding.js";
-import { isNative, startBackend, stopBackend, onReconfigure, onSettings } from "./native.js";
+import { isNative, startBackend, stopBackend, onReconfigure, onSettings, checkForUpdates, appVersion, type BackendInfo } from "./native.js";
 import { openTerminalSettings } from "./settings-ui.js";
-import type { DeviceRecord } from "@glass/protocol";
+import { cmpVersions } from "./update-policy.js";
+import { DeviceId, type DeviceRecord, type DeviceRole, type EnrollCompanion } from "@glass/protocol";
+
+/** Build the enrollment config for a spoke: enroll the viewer, with the local
+ *  shell-agent as a companion so one approval trusts the whole Mac. */
+function spokeEnroll(res?: BackendInfo): EnrollConfig {
+  const companions: EnrollCompanion[] =
+    res?.agentId && res.agentPub ? [{ deviceId: DeviceId.parse(res.agentId), publicKey: res.agentPub, roles: ["agent"] }] : [];
+  return { deviceName: res?.agentName || "This device", roles: ["viewer"], companions };
+}
 import "@xterm/xterm/css/xterm.css";
 import "./style.css";
 
@@ -46,6 +55,16 @@ function storedRole(): Role | null {
 async function main(): Promise<void> {
   const app = document.getElementById("app");
   if (!app) throw new Error("#app missing");
+
+  // Auto-update (desktop): pull + apply a newer signed build and relaunch — no
+  // manual reinstall. Spokes/standalone reach the update origin (a REMOTE hub,
+  // already up) immediately, so they check now. The HUB updates itself through
+  // its OWN relay tunnel, which isn't up until startBackend() below — so it
+  // defers its check to runRole()'s hub branch. Fails open offline.
+  if (isNative() && storedRole() !== "hub") {
+    const relaunching = await checkForUpdates((msg) => showUpdating(app, msg));
+    if (relaunching) return; // a relaunch into the new version is under way
+  }
 
   const identity = await loadOrCreateIdentity();
 
@@ -148,12 +167,13 @@ async function runRole(app: HTMLElement, identity: DeviceIdentity, role: Role, s
   if (role === "spoke") {
     const cfg = loadHubConfig();
     if (!cfg) throw new Error("spoke role has no saved hub connection — pick Spoke again to re-enter it");
+    let res: BackendInfo | undefined;
     if (isNative()) {
       if (splash) showStarting(app, role);
-      await startBackend("spoke", { hubUrl: cfg.hubUrl, ...(cfg.hubKeyPin ? { hubKeyPin: cfg.hubKeyPin } : {}) });
+      res = await startBackend("spoke", { hubUrl: cfg.hubUrl, ...(cfg.hubKeyPin ? { hubKeyPin: cfg.hubKeyPin } : {}) });
     }
     localStorage.setItem(ROLE_KEY, "spoke");
-    startApp(app, identity, cfg);
+    startApp(app, identity, cfg, undefined, spokeEnroll(res));
     return;
   }
 
@@ -168,6 +188,14 @@ async function runRole(app: HTMLElement, identity: DeviceIdentity, role: Role, s
     const res = await startBackend("hub", { deviceId: identity.deviceId, devicePub: identity.publicKey });
     if (!res.hubKey) throw new Error("hub backend did not report its identity key");
     localStorage.setItem(ROLE_KEY, "hub");
+    // Now that the hub backend is up and its relay tunnel is dialing, run the
+    // deferred auto-update check the top of main() skipped for the hub. Retry a
+    // few times to catch the tunnel as it finishes connecting (the hub reaches
+    // its own update origin only through that tunnel). Relaunch if newer.
+    if (isNative()) {
+      const relaunching = await checkForUpdates((msg) => showUpdating(app, msg), { attempts: 5, delayMs: 2000 });
+      if (relaunching) return;
+    }
     startApp(app, identity, { hubUrl: res.hubUrl, hubKeyPin: res.hubKey }, { hubKey: res.hubKey });
   }
 }
@@ -185,6 +213,18 @@ async function reconfigure(app: HTMLElement, identity: DeviceIdentity): Promise<
   }
   localStorage.removeItem(ROLE_KEY);
   showOnboarding(app, { onPick: (r) => pickRole(app, identity, r, true) });
+}
+
+/** Splash shown while a signed auto-update downloads + installs before relaunch. */
+function showUpdating(app: HTMLElement, msg: string): void {
+  app.replaceChildren();
+  const screen = document.createElement("div");
+  screen.className = "onboard";
+  const note = document.createElement("p");
+  note.className = "onboard-starting";
+  note.textContent = msg;
+  screen.append(note);
+  app.append(screen);
 }
 
 /** Minimal splash while the local backend comes up on a normal launch. */
@@ -288,22 +328,29 @@ function showSpokeScreen(app: HTMLElement, identity: DeviceIdentity, reloadAfter
       return;
     }
     const pin = pinInput.value.trim();
+    if (!pin) {
+      // The pin authenticates the hub; without it a spoke over the relay has no
+      // defense against a man-in-the-middle. The backend refuses too — mirror it here.
+      error.textContent = "hub key is required — paste the key shown on the hub";
+      return;
+    }
     error.textContent = "";
     connectBtn.disabled = true;
     backBtn.disabled = true;
     try {
+      let res: BackendInfo | undefined;
       if (isNative()) {
         // Also join this Mac's shells to the fleet via the local backend.
         connectBtn.textContent = "starting…";
-        await startBackend("spoke", { hubUrl, ...(pin ? { hubKeyPin: pin } : {}) });
+        res = await startBackend("spoke", { hubUrl, hubKeyPin: pin });
       }
-      saveHubConfig(hubUrl, pin || undefined);
+      saveHubConfig(hubUrl, pin);
       localStorage.setItem(ROLE_KEY, "spoke");
       if (reloadAfter) {
         location.reload();
         return;
       }
-      startApp(app, identity, pin ? { hubUrl, hubKeyPin: pin } : { hubUrl });
+      startApp(app, identity, { hubUrl, hubKeyPin: pin }, undefined, spokeEnroll(res));
     } catch (err) {
       error.textContent = err instanceof Error ? err.message : String(err);
       connectBtn.disabled = false;
@@ -322,7 +369,7 @@ function showSpokeScreen(app: HTMLElement, identity: DeviceIdentity, reloadAfter
   urlInput.focus();
 }
 
-function startApp(app: HTMLElement, identity: DeviceIdentity, config: HubConfig, extras?: { hubKey?: string }): void {
+function startApp(app: HTMLElement, identity: DeviceIdentity, config: HubConfig, extras?: { hubKey?: string }, enroll?: EnrollConfig): void {
   app.replaceChildren();
 
   const sidebar = document.createElement("aside");
@@ -377,9 +424,95 @@ function startApp(app: HTMLElement, identity: DeviceIdentity, config: HubConfig,
   deviceList.className = "devices";
   sidebar.append(deviceList);
 
+  // Version footer — flips visibly when an auto-update lands (native only).
+  const versionFoot = document.createElement("div");
+  versionFoot.className = "version-foot";
+  sidebar.append(versionFoot);
+
+  // Update-available banner (native only). The hub pushes `update.available` with
+  // the version at its origin; we nag ONLY when it's strictly newer than what we
+  // run. The button applies the signed update and relaunches; on the new version
+  // the hub's next push equals our version, so the banner clears itself.
+  let runningVersion = "";
+  let offeredVersion = "";
+  let updating = false;
+  let errored = false;
+  const updateBanner = document.createElement("div");
+  updateBanner.className = "update-banner";
+  updateBanner.hidden = true;
+  const bannerText = document.createElement("span");
+  bannerText.className = "update-banner-text";
+  const bannerBtn = document.createElement("button");
+  bannerBtn.className = "update-banner-btn";
+  bannerBtn.textContent = "Restart to update";
+  bannerBtn.addEventListener("click", () => void applyUpdate());
+  updateBanner.append(bannerText, bannerBtn);
+
+  function refreshUpdateBanner(): void {
+    // While an update is in flight OR has just failed, applyUpdate() owns the
+    // banner's text (progress / error + Retry) — keep it visible and don't
+    // clobber it. This is what stops a mid-update hub push from hiding a failure
+    // and stranding the Retry button.
+    if (updating || errored) {
+      updateBanner.hidden = false;
+      return;
+    }
+    const newer = !!runningVersion && !!offeredVersion && cmpVersions(offeredVersion, runningVersion) > 0;
+    updateBanner.hidden = !(isNative() && newer);
+    if (!updateBanner.hidden) {
+      bannerText.textContent = `Glass ${offeredVersion} is available.`;
+      bannerBtn.textContent = "Restart to update";
+      bannerBtn.disabled = false;
+    }
+  }
+
+  async function applyUpdate(): Promise<void> {
+    if (updating) return;
+    updating = true;
+    errored = false;
+    bannerBtn.disabled = true;
+    bannerText.textContent = "Updating…";
+    updateBanner.hidden = false;
+    // On success this verifies + installs the signed build and relaunches — it
+    // never returns here. onError sets the visible error state so a failure and
+    // its Retry button survive any concurrent hub push.
+    const ok = await checkForUpdates((msg) => (bannerText.textContent = msg), {
+      attempts: 3,
+      delayMs: 2000,
+      onError: (msg) => {
+        updating = false;
+        errored = true;
+        bannerText.textContent = msg;
+        bannerBtn.textContent = "Retry";
+        bannerBtn.disabled = false;
+        updateBanner.hidden = false;
+      },
+    });
+    if (!ok) {
+      updating = false;
+      // If onError fired, `errored` keeps the failure visible. Otherwise this was
+      // "reachable but nothing to install" (rare race) — clear and re-evaluate.
+      if (!errored) refreshUpdateBanner();
+    }
+  }
+
+  if (isNative()) {
+    void appVersion()
+      .then((v) => {
+        runningVersion = v;
+        versionFoot.textContent = `Glass ${v}`;
+        refreshUpdateBanner();
+      })
+      .catch(() => undefined);
+  }
+
   let workspace: Workspace;
   let latestDevices: DeviceRecord[] = [];
   let didAutoOpen = false;
+  // Sessions that exist on agents but this viewer has NOT attached — discovered
+  // via listSessions on connect and live session.created broadcasts. Shown in the
+  // sidebar; clicking one attaches it. sessionId -> { agentId, title }.
+  const remote = new Map<string, { agentId: string; title: string }>();
 
   const client = new HubClient(
     config.hubUrl,
@@ -398,22 +531,40 @@ function startApp(app: HTMLElement, identity: DeviceIdentity, config: HubConfig,
       onDevices: (devices) => {
         latestDevices = devices;
         renderSidebar();
-        maybeAutoOpen();
       },
       onDeviceState: () => void refreshDevices(),
       onScrollback: (sid, sb) => workspace.reset(sid, sb),
       onOutput: (sid, data) => workspace.write(sid, data),
       onExited: (sid) => {
+        remote.delete(sid);
         workspace.markDead(sid, "session exited");
         renderSidebar();
+      },
+      onSessionAppeared: (session) => {
+        // A shell opened elsewhere in the fleet. Track it as attachable unless we
+        // already hold it (e.g. the broadcast echo of a shell we just created).
+        if (!workspace.has(session.id) && !remote.has(session.id)) {
+          remote.set(session.id, { agentId: session.deviceId, title: session.title });
+          renderSidebar();
+        }
       },
       onError: (code, message) => {
         statusText.textContent = `error: ${code} — ${message}`;
         if (code === "hub_identity") status.dataset["state"] = "error";
       },
+      onUpdateAvailable: (version) => {
+        offeredVersion = version;
+        refreshUpdateBanner();
+      },
+      // --- enrollment ---
+      onEnrollWaiting: (code) => showJoinWaiting(code),          // this device is joining
+      onEnrollApproved: () => clearJoinOverlay(),                 // trusted now; client reconnects
+      onEnrollDenied: () => showJoinDenied(),
+      onEnrollRequest: (req) => showApprovalPrompt(req),          // another device wants in
     },
     identity,
     config.hubKeyPin,
+    enroll,
   );
   currentClient = client;
 
@@ -432,21 +583,43 @@ function startApp(app: HTMLElement, identity: DeviceIdentity, config: HubConfig,
   backdrop.className = "drawer-backdrop";
   backdrop.addEventListener("click", () => app.classList.remove("drawer-open"));
 
-  app.append(sidebar, workspace.el, menuBtn, backdrop);
+  app.append(sidebar, workspace.el, menuBtn, backdrop, updateBanner);
 
   async function refreshDevices(): Promise<void> {
     try {
       latestDevices = await client.listDevices();
-      renderSidebar();
-      maybeAutoOpen();
     } catch {
-      /* not connected yet */
+      return; /* not connected yet */
     }
+    await refreshRemoteSessions();
+    renderSidebar();
+    maybeAutoOpen();
   }
 
-  /** Plan §6: start with one shell open on the first connected agent. */
+  /** Pull each connected agent's session list into `remote` (minus ones we hold),
+   *  so a viewer sees shells opened by OTHER devices, not just its own. */
+  async function refreshRemoteSessions(): Promise<void> {
+    const agents = latestDevices.filter((d) => d.roles.includes("agent") && d.state === "connected");
+    await Promise.all(
+      agents.map(async (a) => {
+        let list: Awaited<ReturnType<typeof client.listSessions>>;
+        try {
+          list = await client.listSessions(a.id);
+        } catch {
+          return;
+        }
+        for (const [sid, r] of remote) if (r.agentId === a.id) remote.delete(sid);
+        for (const s of list) {
+          if (workspace.has(s.id)) continue; // already attached locally
+          remote.set(s.id, { agentId: a.id, title: s.title });
+        }
+      }),
+    );
+  }
+
+  /** Plan §6: open one shell on connect ONLY if the fleet has nothing to show. */
   function maybeAutoOpen(): void {
-    if (didAutoOpen || workspace.sessionList().length > 0) return;
+    if (didAutoOpen || workspace.sessionList().length > 0 || remote.size > 0) return;
     const agent = latestDevices.find((d) => d.roles.includes("agent") && d.state === "connected");
     if (agent) {
       didAutoOpen = true;
@@ -458,6 +631,7 @@ function startApp(app: HTMLElement, identity: DeviceIdentity, config: HubConfig,
     try {
       const n = workspace.sessionList().filter((s) => s.agentId === agentId).length + 1;
       const session = await client.createSession(agentId, { kind: "pty" });
+      remote.delete(session.id); // in case its own broadcast raced ahead of us
       workspace.add(session.id, agentId, `${agentName} · shell ${n}`);
       workspace.show(session.id); // switch to the new shell
       app.classList.remove("drawer-open"); // mobile: reveal the new shell
@@ -467,12 +641,30 @@ function startApp(app: HTMLElement, identity: DeviceIdentity, config: HubConfig,
     }
   }
 
+  /** Attach a session that lives on another device and bring it into the workspace. */
+  async function openRemote(agentId: string, sessionId: string, title: string): Promise<void> {
+    remote.delete(sessionId);
+    workspace.add(sessionId, agentId, title);
+    workspace.show(sessionId);
+    app.classList.remove("drawer-open");
+    renderSidebar();
+    try {
+      await client.attach(agentId, sessionId); // scrollback paints via onScrollback
+    } catch (err) {
+      workspace.markDead(sessionId, "could not attach");
+      statusText.textContent = `could not attach: ${String(err)}`;
+    }
+  }
+
   /** Sidebar: each agent (device) with its sessions nested beneath it. */
   function renderSidebar(): void {
     deviceList.replaceChildren();
     const agents = latestDevices.filter((d) => d.roles.includes("agent"));
     const sessions = workspace.sessionList();
-    const agentIds = [...new Set([...agents.map((a) => a.id), ...sessions.map((s) => s.agentId)])];
+    const remoteList = [...remote.entries()]
+      .filter(([sid]) => !workspace.has(sid))
+      .map(([sid, r]) => ({ sessionId: sid, agentId: r.agentId, title: r.title }));
+    const agentIds = [...new Set([...agents.map((a) => a.id), ...sessions.map((s) => s.agentId), ...remoteList.map((s) => s.agentId)])];
     if (agentIds.length === 0) {
       const empty = document.createElement("div");
       empty.className = "empty";
@@ -529,7 +721,135 @@ function startApp(app: HTMLElement, identity: DeviceIdentity, config: HubConfig,
         });
         deviceList.append(item);
       }
+
+      // Sessions on this agent that we haven't attached yet (opened by another
+      // device). Click to attach + view; × ends it remotely.
+      for (const s of remoteList.filter((x) => x.agentId === agentId)) {
+        const item = document.createElement("div");
+        item.className = "session";
+        item.dataset["remote"] = "true";
+        item.dataset["visible"] = "false";
+        const stitle = document.createElement("span");
+        stitle.className = "session-title";
+        stitle.textContent = s.title.replace(/^.*·\s*/, "") || "shell";
+        const hint = document.createElement("span");
+        hint.className = "session-hint";
+        hint.textContent = "open";
+        const kill = document.createElement("button");
+        kill.className = "session-kill";
+        kill.textContent = "×";
+        kill.title = "end this session";
+        kill.addEventListener("click", (e) => {
+          e.stopPropagation();
+          client.closeSession(agentId, s.sessionId);
+          remote.delete(s.sessionId);
+          renderSidebar();
+        });
+        item.append(stitle, hint, kill);
+        item.addEventListener("click", () => void openRemote(agentId, s.sessionId, s.title));
+        deviceList.append(item);
+      }
     }
+  }
+
+  // --- enrollment UI (self-serve join) ---
+  let joinOverlay: HTMLElement | null = null;
+  function clearJoinOverlay(): void {
+    joinOverlay?.remove();
+    joinOverlay = null;
+  }
+  function joinCard(title: string, body: (card: HTMLElement) => void): void {
+    clearJoinOverlay();
+    const o = document.createElement("div");
+    o.className = "join-overlay";
+    const card = document.createElement("div");
+    card.className = "join-card";
+    const h = document.createElement("div");
+    h.className = "join-title";
+    h.textContent = title;
+    card.append(h);
+    body(card);
+    o.append(card);
+    app.append(o);
+    joinOverlay = o;
+  }
+  function showJoinWaiting(code: string): void {
+    joinCard("Waiting for approval", (card) => {
+      const codeEl = document.createElement("div");
+      codeEl.className = "join-code";
+      codeEl.textContent = code;
+      const hint = document.createElement("p");
+      hint.className = "join-hint";
+      hint.textContent = "On your hub, approve this device — confirm it shows this same code.";
+      const cancel = document.createElement("button");
+      cancel.className = "connect-back";
+      cancel.textContent = "cancel";
+      cancel.addEventListener("click", () => void reconfigure(app, identity));
+      card.append(codeEl, hint, cancel);
+    });
+  }
+  function showJoinDenied(): void {
+    joinCard("Join declined", (card) => {
+      const hint = document.createElement("p");
+      hint.className = "join-hint";
+      hint.textContent = "The hub declined the request or the code expired.";
+      const back = document.createElement("button");
+      back.className = "connect-back";
+      back.textContent = "back to setup";
+      back.addEventListener("click", () => void reconfigure(app, identity));
+      card.append(hint, back);
+    });
+  }
+  function showApprovalPrompt(req: { requestId: string; deviceName: string; roles: DeviceRole[]; companions: EnrollCompanion[] }): void {
+    // Dedup: never stack two prompts for the same request (anti prompt-fatigue).
+    app.querySelector(`.enroll-approve[data-request-id="${CSS.escape(req.requestId)}"]`)?.remove();
+    const o = document.createElement("div");
+    o.className = "enroll-approve";
+    o.dataset["requestId"] = req.requestId;
+    const title = document.createElement("div");
+    title.className = "enroll-approve-title";
+    title.textContent = `${req.deviceName} wants to join`;
+    // Show EXACTLY what will be trusted — roles + any companion keys.
+    const scope = document.createElement("p");
+    scope.className = "connect-hint";
+    const roleTxt = req.roles.length ? req.roles.join(", ") : "viewer";
+    // Itemize each companion (role + id) so the approver sees exactly what's added.
+    const compTxt = req.companions.length ? ` + ${req.companions.map((c) => `${c.roles.join("/")} ${c.deviceId}`).join(", ")}` : "";
+    scope.textContent = `grants: ${roleTxt}${compTxt}`;
+    const hint = document.createElement("p");
+    hint.className = "connect-hint";
+    hint.textContent = "Type the 6-digit code shown on that device to approve.";
+    const input = document.createElement("input");
+    input.className = "enroll-approve-input";
+    input.inputMode = "numeric";
+    input.maxLength = 6;
+    input.placeholder = "code";
+    input.autocomplete = "off";
+    const row = document.createElement("div");
+    row.className = "connect-buttons";
+    const approve = document.createElement("button");
+    approve.className = "connect-go";
+    approve.textContent = "approve";
+    approve.addEventListener("click", () => {
+      const code = input.value.trim();
+      if (!/^\d{6}$/.test(code)) {
+        input.focus();
+        return;
+      }
+      client.sendEnrollDecision(req.requestId, true, code);
+      o.remove();
+    });
+    const deny = document.createElement("button");
+    deny.className = "connect-back";
+    deny.textContent = "deny";
+    deny.addEventListener("click", () => {
+      client.sendEnrollDecision(req.requestId, false);
+      o.remove();
+    });
+    row.append(approve, deny);
+    o.append(title, scope, hint, input, row);
+    app.append(o);
+    setTimeout(() => o.remove(), 120_000); // matches the hub's enrollment TTL
   }
 
   client.connect();

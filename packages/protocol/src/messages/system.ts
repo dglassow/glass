@@ -38,9 +38,22 @@ export const ProtocolError = z.object({
 });
 export type ProtocolError = z.infer<typeof ProtocolError>;
 
+/**
+ * Hub → viewer: a newer signed build is available at the hub's update origin.
+ * Purely advisory (a live nag banner); the actual install is still minisign-gated
+ * on the device, so a lying `version` can at worst prompt a no-op update check.
+ * The viewer compares it against its OWN running version to decide whether to nag.
+ */
+export const UpdateAvailable = z.object({
+  type: z.literal("update.available"),
+  version: z.string().min(1).max(64),
+});
+export type UpdateAvailable = z.infer<typeof UpdateAvailable>;
+
 export const SystemMessage = z.discriminatedUnion("type", [
   Heartbeat,
   HeartbeatAck,
   ProtocolError,
+  UpdateAvailable,
 ]);
 export type SystemMessage = z.infer<typeof SystemMessage>;

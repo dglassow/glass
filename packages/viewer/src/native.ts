@@ -11,6 +11,8 @@
  * No DOM access here — pure feature detection + invoke/listen.
  */
 
+import { emptyUpdateState, reconcile, shouldInstall, markAttempt, type UpdateState } from "./update-policy.js";
+
 /** Mirrors BrowserKind in packages/agent/src/proxy/browser-profile.ts. */
 export type BrowserKind = "chrome" | "chromium" | "brave" | "edge";
 
@@ -32,6 +34,11 @@ export interface BackendInfo {
   role: string;
   hubUrl: string;
   hubKey?: string;
+  /** Spoke role: the local shell-agent's identity, so the viewer can enroll it
+   *  as a companion under one approval. */
+  agentId?: string;
+  agentPub?: string;
+  agentName?: string;
 }
 
 export interface BackendStatus {
@@ -76,6 +83,98 @@ function tauriInvoke(): TauriInvoke | undefined {
 /** True when running inside the Glass desktop shell (Tauri), not a browser/PWA. */
 export function isNative(): boolean {
   return tauriInvoke() !== undefined;
+}
+
+/**
+ * Auto-update (native only). On launch, ask the hub for a newer signed build; if
+ * there is one, download + install it and relaunch into the new version — the
+ * device never needs a manual reinstall. The artifact is verified against the
+ * app's embedded updater public key (minisign) AND is Developer-ID notarized, so
+ * a compromised update server cannot push an unsigned/altered build. Fails open
+ * (stays on the current version) if the hub is unreachable or there's no update.
+ */
+const UPDATE_STATE_KEY = "glass.update.state";
+function loadUpdateState(): UpdateState {
+  try {
+    const raw = localStorage.getItem(UPDATE_STATE_KEY);
+    if (raw) {
+      const s = JSON.parse(raw) as UpdateState;
+      if (s && typeof s.floor === "string" && Array.isArray(s.blocked)) return s;
+    }
+  } catch {
+    /* corrupt/missing — start clean */
+  }
+  return emptyUpdateState();
+}
+function saveUpdateState(s: UpdateState): void {
+  try {
+    localStorage.setItem(UPDATE_STATE_KEY, JSON.stringify(s));
+  } catch {
+    /* storage unavailable — anti-rollback degrades to Tauri's > current gate */
+  }
+}
+
+export async function checkForUpdates(
+  onStatus?: (msg: string) => void,
+  opts?: { attempts?: number; delayMs?: number; onError?: (msg: string) => void },
+): Promise<boolean> {
+  if (!isNative()) return false;
+  const attempts = Math.max(1, opts?.attempts ?? 1);
+  const delayMs = opts?.delayMs ?? 2000;
+
+  // Read the running version up front — it's the anti-rollback anchor. Guard it:
+  // if the IPC ever failed here (outside the retry loop's try), the whole check
+  // would reject uncaught. Fail open instead (stay on the current version).
+  let current: string;
+  try {
+    current = await appVersion();
+  } catch (err) {
+    console.error("glass: could not read app version; skipping update check:", err);
+    opts?.onError?.(`Update check unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+  // Reconcile persisted state against the version we ACTUALLY booted: raise the
+  // anti-rollback floor and poison any prior target that didn't advance (a lying
+  // manifest / brick loop). This is what makes a compromised update origin unable
+  // to force a downgrade or an infinite reinstall. Done ONCE, before any retry.
+  const state = reconcile(loadUpdateState(), current);
+  saveUpdateState(state);
+
+  // The hub updates itself through its OWN relay tunnel, which only finishes
+  // dialing the relay a beat after the backend starts — so the first check() can
+  // hit a not-yet-open tunnel and throw. Retry a few times (opts.attempts) so we
+  // catch the tunnel as it comes up. A reachable "no newer version" is a definite
+  // answer and returns immediately; only a thrown (unreachable) check retries.
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const { check } = await import("@tauri-apps/plugin-updater");
+      const update = await check();
+      if (!update) return false;
+      if (!shouldInstall(state, current, update.version)) {
+        console.error(`glass: refusing update ${update.version} (anti-rollback/poisoned/halted; running ${current}, floor ${state.floor})`);
+        opts?.onError?.(`Update ${update.version} was blocked by the anti-rollback safeguard.`);
+        return false;
+      }
+      onStatus?.(`Updating Glass to ${update.version}…`);
+      // Download+verify (artifact minisign) FIRST. Only record the attempt once the
+      // install actually took — a transient download failure must not poison a legit
+      // version. If the next boot isn't this version, reconcile() poisons it.
+      await update.downloadAndInstall();
+      saveUpdateState(markAttempt(state, update.version));
+      const { relaunch } = await import("@tauri-apps/plugin-process");
+      await relaunch(); // does not return
+      return true;
+    } catch (err) {
+      if (i < attempts - 1) {
+        await new Promise((r) => setTimeout(r, delayMs));
+        continue;
+      }
+      console.error("glass: update check failed (staying on current version):", err);
+      opts?.onError?.(`Update failed: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  }
+  return false;
 }
 
 function requireInvoke(what: string): TauriInvoke {

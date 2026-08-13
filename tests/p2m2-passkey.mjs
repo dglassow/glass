@@ -175,11 +175,11 @@ async function run() {
     const pro = await makeIdentity("pro");
     const dev = new Peer(url, "pro");
     await dev.opened;
-    const code = "314159";
-    const reqId = dev.send({ type: "device.enroll.request", deviceId: "pro", deviceName: "Pro", roles: ["agent"], publicKey: pro.publicKey, verificationCode: code });
-    await dev.waitFor((e) => e.body?.type === "device.enroll.pending" && e.replyTo === reqId, "dev ack");
+    const reqId = dev.send({ type: "device.enroll.request", deviceId: "pro", deviceName: "Pro", roles: ["agent"], publicKey: pro.publicKey });
+    const ack = await dev.waitFor((e) => e.body?.type === "device.enroll.pending" && e.replyTo === reqId, "dev ack");
+    const code = ack.body.verificationCode; // hub-minted, shown only to the joiner
     const bcast = await owner.peer.waitFor((e) => e.body?.type === "device.enroll.pending", "owner sees pending");
-    check("passkey session receives the enrollment broadcast", bcast.body.verificationCode === code);
+    check("passkey session receives the enrollment broadcast (scope, no code)", bcast.body.verificationCode === undefined && bcast.body.deviceName === "Pro" && /^\d{6}$/.test(code ?? ""));
     const decId = owner.peer.send({ type: "device.enroll.decision", requestId: bcast.body.requestId, approved: true, verificationCode: code });
     const dec = await owner.peer.waitFor((e) => e.body?.type === "device.enroll.decision" && e.replyTo === decId, "decision");
     check("passkey owner approves enrollment (approvedBy hub-credential)", dec.body.approved === true && dec.body.approvedBy === "hub-credential");

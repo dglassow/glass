@@ -220,6 +220,22 @@ async function runServer(argv: string[]): Promise<void> {
   const port = idx >= 0 ? Number(listen.slice(idx + 1)) : 0;
   if (!Number.isInteger(port) || port < 0) throw new Error(`invalid --listen ${listen}`);
 
+  // Optional SECOND listener carrying TLS (plan §5/§2). With --tls-listen, the
+  // primary --listen stays a plaintext loopback ws:// (the local viewer needs no
+  // cert), and the TLS wss:// endpoint — cert, /git/, PWA, channel binding — runs
+  // on this listener, which is what the relay tunnel forwards to. Both share one
+  // hub (registry + trust). Without --tls-listen, TLS (if any) stays on --listen.
+  const tlsListen = flag(argv, "--tls-listen");
+  let tlsHost = "127.0.0.1";
+  let tlsPort = 0;
+  if (tlsListen) {
+    const ti = tlsListen.lastIndexOf(":");
+    tlsHost = ti >= 0 ? tlsListen.slice(0, ti) || "127.0.0.1" : "127.0.0.1";
+    tlsPort = ti >= 0 ? Number(tlsListen.slice(ti + 1)) : 0;
+    if (!Number.isInteger(tlsPort) || tlsPort < 0) throw new Error(`invalid --tls-listen ${tlsListen}`);
+    if (open) throw new Error("--tls-listen cannot be combined with --open (the exposed listener requires device auth)");
+  }
+
   // Optional passkey bootstrap (plan §8.4).
   const credStorePath = flag(argv, "--cred-store");
   const registerToken = flag(argv, "--register-token");
@@ -255,6 +271,7 @@ async function runServer(argv: string[]): Promise<void> {
   const hubKeyPath = flag(argv, "--hub-key");
   let tlsConfig = {};
   if (tlsCert && tlsKey) tlsConfig = { tls: { cert: readFileSync(tlsCert, "utf8"), key: readFileSync(tlsKey, "utf8") } };
+  if (tlsListen && !(tlsCert && tlsKey)) throw new Error("--tls-listen requires --tls-cert/--tls-key");
   let hubSignerConfig = {};
   if (hubKeyPath) {
     const hubSigner = await loadOrCreateHubSigner(hubKeyPath);
@@ -285,6 +302,20 @@ async function runServer(argv: string[]): Promise<void> {
     webConfig = { webRoot };
   }
 
+  // Optional desktop auto-update endpoint. --updates-root points at a dir holding
+  // latest.json + the signed .app.tar.gz; served under /updates/ on the TLS listener.
+  const updatesRoot = flag(argv, "--updates-root");
+  let updatesConfig = {};
+  if (updatesRoot) {
+    if (open) throw new Error("--updates-root cannot be combined with --open");
+    if (!(tlsCert && tlsKey)) throw new Error("--updates-root requires TLS (--tls-cert/--tls-key)");
+    if (!statSync(updatesRoot, { throwIfNoEntry: false })?.isDirectory()) throw new Error(`--updates-root ${updatesRoot} is not a directory`);
+    updatesConfig = { updatesRoot };
+  }
+
+  // The TLS/git/PWA/updates endpoint rides the primary listener, unless --tls-listen
+  // moved it to a dedicated second (TLS) listener alongside a plaintext primary.
+  const endpointConfig = { ...tlsConfig, ...gitConfig, ...webConfig, ...updatesConfig };
   const hub = await startHubServer(
     open
       ? { host, port, mode: "open" }
@@ -296,15 +327,20 @@ async function runServer(argv: string[]): Promise<void> {
           ...(enrollTtl !== undefined ? { enrollTtlMs: Number(enrollTtl) } : {}),
           ...credentialConfig,
           ...vaultConfig,
-          ...tlsConfig,
           ...hubSignerConfig,
-          ...gitConfig,
-          ...webConfig,
+          ...(tlsListen
+            ? { listeners: [{ host: tlsHost, port: tlsPort, ...endpointConfig }] }
+            : endpointConfig),
         },
   );
   if (gitRoot) console.error(`hub: git hosting enabled from ${gitRoot} (served under /git/)`);
   if (webRoot) console.error(`hub: serving viewer PWA from ${webRoot}`);
-  console.error(`hub: listening on ${hub.url} (pid ${process.pid}, ${open ? "OPEN — no auth" : "trust mode"})`);
+  for (const l of hub.listeners) {
+    console.error(`hub: listening on ${l.url} (pid ${process.pid}, ${open ? "OPEN — no auth" : "trust mode"}${l.tls ? ", TLS" : ""})`);
+  }
+  // Sentinel printed only after every listener is bound, so a supervisor can
+  // scrape all "listening on" lines above without racing the async binds.
+  console.error(`hub: ready — ${hub.listeners.length} listener(s)`);
   if (credStorePath) console.error(`hub: passkey bootstrap enabled (rpID=${rpID})`);
   if (open) console.error("hub: WARNING running in --open mode; device-key auth is disabled");
 

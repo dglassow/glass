@@ -147,6 +147,10 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
           addAttach(body.session.id, viewer);
           toHub(viewer, body, env.replyTo);
         }
+        // A newly created session is announced to the hub for fleet-wide fan-out
+        // so every viewer's list updates live. (attach is a private subscription
+        // to an existing session, so it is NOT announced.)
+        if (body.type === "session.created") toHub(HUB, body);
         break;
       }
       case "session.listed":
@@ -167,6 +171,8 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
           for (const viewer of set) toHub(viewer, body);
           attached.delete(body.sessionId);
         }
+        // Announce fleet-wide so non-attached viewers drop it from their lists too.
+        toHub(HUB, body);
         break;
       }
       default:

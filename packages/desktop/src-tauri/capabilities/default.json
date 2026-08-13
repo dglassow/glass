@@ -9,6 +9,8 @@
     "allow-app-version",
     "allow-start-backend",
     "allow-stop-backend",
-    "allow-backend-status"
+    "allow-backend-status",
+    "updater:default",
+    "process:default"
   ]
 }

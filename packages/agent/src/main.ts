@@ -92,6 +92,15 @@ async function main(): Promise<void> {
   }
 
   if (args.hub) {
+    // Fail closed: disabling certificate validation (--insecure-tls) is only
+    // safe when the hub's identity is pinned (--hub-key), because the pin +
+    // channel binding is then the sole defense against a MITM (e.g. a hostile
+    // relay). Without a pin, an unpinned insecure-TLS spoke has NO protection
+    // and would authenticate straight through an attacker. Refuse to run.
+    if (args.insecureTls && !args.hubKey) {
+      console.error("agent: refusing to run with --insecure-tls but no --hub-key — certificate validation is disabled and the hub is unpinned, which offers no protection against a man-in-the-middle. Provide the hub key pin.");
+      process.exit(2);
+    }
     const signer = args.key ? await loadOrCreateSigner(args.key, args.deviceId) : undefined;
     const link = await startHubLink({
       sessiondPath: args.sessiond,

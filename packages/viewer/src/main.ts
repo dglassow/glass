@@ -30,6 +30,7 @@ import { showOnboarding, type Role } from "./onboarding.js";
 import { isNative, startBackend, stopBackend, onReconfigure, onSettings, checkForUpdates, appVersion, launchProxiedBrowser, type BackendInfo } from "./native.js";
 import { openTerminalSettings } from "./settings-ui.js";
 import { cmpVersions } from "./update-policy.js";
+import { createRibbon } from "./ribbon.js";
 import { DeviceId, type DeviceRecord, type DeviceRole, type EnrollCompanion } from "@glass/protocol";
 
 /** Build the enrollment config for a spoke: enroll the viewer, with the local
@@ -669,7 +670,13 @@ function startApp(
   backdrop.className = "drawer-backdrop";
   backdrop.addEventListener("click", () => app.classList.remove("drawer-open"));
 
-  app.append(sidebar, workspace.el, menuBtn, backdrop, updateBanner);
+  // Right-side ribbon (customizable widget dock). Nothing registers a widget
+  // yet — future ones call ribbon.register({ id, title, icon, activate }) here
+  // and the user pins/orders them via its customize dialog.
+  const ribbon = createRibbon();
+  app.classList.add("has-ribbon");
+
+  app.append(sidebar, workspace.el, ribbon.el, menuBtn, backdrop, updateBanner);
 
   async function refreshDevices(): Promise<void> {
     try {

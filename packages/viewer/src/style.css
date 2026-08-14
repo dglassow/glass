@@ -33,6 +33,10 @@ body {
   display: grid;
   grid-template-columns: 240px 1fr;
 }
+/* Main layout with the right-side ribbon mounted (onboarding screens keep 2 cols). */
+#app.has-ribbon {
+  grid-template-columns: 240px 1fr auto;
+}
 
 .sidebar {
   background: var(--panel);
@@ -745,6 +749,70 @@ button.tset-done {
 }
 button.tset-done:hover { background: #1d2536; }
 
+/* ---- right-side ribbon (ribbon.ts): customizable widget dock ------------ */
+
+.ribbon {
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 6px;
+  width: 44px;
+  overflow: hidden;
+}
+
+.ribbon-items {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.ribbon-item,
+.ribbon-customize {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  border-radius: 8px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+}
+.ribbon-item:hover,
+.ribbon-customize:hover {
+  color: var(--fg);
+  background: var(--bg);
+  border-color: var(--line);
+}
+
+/* Customize dialog rows (inside .tset-panel). */
+.ribbon-config {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ribbon-config-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+}
+.ribbon-config-row button { flex: none; padding: 1px 8px; }
+.ribbon-config-icon { width: 20px; text-align: center; }
+.ribbon-config-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ribbon-config-empty { color: var(--muted); font-size: 12px; line-height: 1.5; }
+
 /* ---- mobile / PWA (<720px): sidebar becomes a slide-out drawer ---------- */
 
 /* Desktop: the drawer chrome doesn't exist. Both are position:fixed when
@@ -756,8 +824,11 @@ button.tset-done:hover { background: #1d2536; }
   /* On a phone there is no transparent Tauri window — paint opaque. */
   body { background: var(--bg); }
 
-  /* Workspace fills the screen; the sidebar overlays as a drawer. */
-  #app { grid-template-columns: 1fr; }
+  /* Workspace fills the screen; the sidebar overlays as a drawer. The ribbon
+     is desktop chrome — the PWA is chat-only, so it doesn't exist here. */
+  #app,
+  #app.has-ribbon { grid-template-columns: 1fr; }
+  .ribbon { display: none; }
 
   .sidebar {
     position: fixed;

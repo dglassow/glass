@@ -580,6 +580,19 @@ button.connect-back:hover:not(:disabled) {
   letter-spacing: 0.06em;
 }
 
+/* Change-notes body inside the update-notes dialog (reuses .tset-overlay/.tset-panel). */
+.notes-body {
+  font: 12px/1.6 var(--mono);
+  color: var(--fg);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: var(--bg);
+  overflow-y: auto;
+}
+
 .tset-section {
   border: 1px solid var(--line);
   border-radius: 8px;

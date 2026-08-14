@@ -256,25 +256,46 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
   // spec, so resolve from either place.
   const updatesDir = opts.updatesRoot ?? opts.listeners?.find((l) => l.updatesRoot !== undefined)?.updatesRoot;
   let latestUpdateVersion: string | undefined;
+  let latestUpdateNotes: string | undefined;
   let updatesWatcher: FSWatcher | undefined;
-  function readManifestVersion(): string | undefined {
+  function readManifest(): { version: string; notes?: string } | undefined {
     if (!updatesDir) return undefined;
     try {
-      const v = (JSON.parse(readFileSync(join(updatesDir, "latest.json"), "utf8")) as { version?: unknown }).version;
-      return typeof v === "string" && v.length > 0 && v.length <= 64 ? v : undefined;
+      const m = JSON.parse(readFileSync(join(updatesDir, "latest.json"), "utf8")) as {
+        version?: unknown;
+        notes?: unknown;
+      };
+      const v = m.version;
+      if (typeof v !== "string" || v.length === 0 || v.length > 64) return undefined;
+      // Notes are display-only text; clamp to the protocol bound so an oversized
+      // manifest can't make our own push fail schema validation on the far side.
+      const notes = typeof m.notes === "string" && m.notes.length > 0 ? m.notes.slice(0, 16384) : undefined;
+      return { version: v, ...(notes !== undefined ? { notes } : {}) };
     } catch {
       return undefined;
     }
   }
+  function updateAvailableBody(): Body | undefined {
+    if (!latestUpdateVersion) return undefined;
+    return {
+      type: "update.available",
+      version: latestUpdateVersion,
+      ...(latestUpdateNotes !== undefined ? { notes: latestUpdateNotes } : {}),
+    };
+  }
   if (updatesDir) {
-    latestUpdateVersion = readManifestVersion();
+    const m = readManifest();
+    latestUpdateVersion = m?.version;
+    latestUpdateNotes = m?.notes;
     try {
       updatesWatcher = watch(updatesDir, (_evt, filename) => {
         if (filename && filename !== "latest.json") return;
-        const v = readManifestVersion();
-        if (v && v !== latestUpdateVersion) {
-          latestUpdateVersion = v;
-          broadcastToAuthenticated(() => ({ type: "update.available", version: v }));
+        const next = readManifest();
+        if (next && next.version !== latestUpdateVersion) {
+          latestUpdateVersion = next.version;
+          latestUpdateNotes = next.notes;
+          const body = updateAvailableBody();
+          if (body) broadcastToAuthenticated(() => body);
         }
       });
       updatesWatcher.unref();
@@ -314,7 +335,8 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
     broadcastToAuthenticated(() => ({ type: "device.state", device: record }));
     // Tell the freshly-authed device if a newer build is already published, so a
     // spoke that connects after a release still learns to nag (not only on live change).
-    if (latestUpdateVersion) reply(socket, pp.deviceId, { type: "update.available", version: latestUpdateVersion });
+    const updateBody = updateAvailableBody();
+    if (updateBody) reply(socket, pp.deviceId, updateBody);
     return epoch;
   }
 

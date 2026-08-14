@@ -51,13 +51,14 @@ async function waitUntil(fn, label, capMs = 6000) {
   while (Date.now() < deadline) { const v = fn(); if (v) return v; await sleep(50); }
   throw new Error(`timed out waiting for ${label}`);
 }
-const writeManifest = (dir, version) => writeFileSync(join(dir, "latest.json"), JSON.stringify({ version, platforms: {} }));
+const writeManifest = (dir, version, extra = {}) =>
+  writeFileSync(join(dir, "latest.json"), JSON.stringify({ version, ...extra, platforms: {} }));
 
 const UPD = mkdtempSync(join(tmpdir(), "glass-p8m5-upd-"));
 const TSDIR = mkdtempSync(join(tmpdir(), "glass-p8m5-ts-"));
 let hub, client;
 try {
-  writeManifest(UPD, "0.1.5");
+  writeManifest(UPD, "0.1.5", { notes: "- fixed the flux capacitor\n- added a second one" });
   const store = new FileTrustStore(join(TSDIR, "trust.json"));
   const dev = await makeIdentity("viewer-x");
   store.add("viewer-x", { publicKey: dev.publicKey, name: "x", roles: ["viewer"], enrolledAt: Date.now(), approvedBy: "test" });
@@ -65,19 +66,22 @@ try {
   hub = await startHubServer({ host: "127.0.0.1", port: 0, mode: "trust", trustStore: store, updatesRoot: UPD });
 
   const offered = [];
+  const notesFor = {};
   let conn = 0;
-  client = new HubClient(hub.url, "viewer-x", "x", { onConnected: () => conn++, onUpdateAvailable: (v) => offered.push(v) }, dev.signer);
+  client = new HubClient(hub.url, "viewer-x", "x", { onConnected: () => conn++, onUpdateAvailable: (v, n) => { offered.push(v); notesFor[v] = n; } }, dev.signer);
   client.connect();
   await waitUntil(() => conn > 0, "device authenticated");
 
   // 1) connect-time push carries the current manifest version
   await waitUntil(() => offered.length > 0, "connect-time push");
   check("connect-time: authed device receives update.available with the manifest version", offered[0] === "0.1.5", `got ${offered[0]}`);
+  check("connect-time: change notes ride the push", notesFor["0.1.5"] === "- fixed the flux capacitor\n- added a second one", `got ${JSON.stringify(notesFor["0.1.5"])}`);
 
   // 2) publishing a newer version broadcasts it live (no reconnect)
-  writeManifest(UPD, "0.1.6");
+  writeManifest(UPD, "0.1.6", { notes: "- live notes" });
   await waitUntil(() => offered.includes("0.1.6"), "live broadcast of 0.1.6");
   check("live: publishing a new version broadcasts it to the connected device", offered.includes("0.1.6"));
+  check("live: change notes ride the broadcast", notesFor["0.1.6"] === "- live notes", `got ${JSON.stringify(notesFor["0.1.6"])}`);
 
   // 3) a malformed / oversized version is refused (not injected into the banner)
   const beforeBad = offered.length;
@@ -95,6 +99,16 @@ try {
   writeManifest(UPD, "0.1.7");
   await sleep(700);
   check("de-dupe: re-writing the same version does not re-broadcast", offered.length === beforeDup, `offered grew by ${offered.length - beforeDup}`);
+
+  // 5b) notes abuse: oversized notes are clamped to the protocol bound (the
+  // update signal must still arrive — notes are advisory, never a DoS lever);
+  // non-string notes are ignored rather than breaking the push.
+  writeManifest(UPD, "0.1.8", { notes: "n".repeat(20000) });
+  await waitUntil(() => offered.includes("0.1.8"), "broadcast with oversized notes");
+  check("notes: oversized notes are clamped, not dropped and not fatal", notesFor["0.1.8"]?.length === 16384, `got length ${notesFor["0.1.8"]?.length}`);
+  writeManifest(UPD, "0.1.9", { notes: 42 });
+  await waitUntil(() => offered.includes("0.1.9"), "broadcast with non-string notes");
+  check("notes: non-string notes are ignored, version still arrives", notesFor["0.1.9"] === undefined, `got ${JSON.stringify(notesFor["0.1.9"])}`);
 
   // 6) banner decision gate — a hub cannot nag you to downgrade or side-grade
   check("gate: a strictly newer offered version nags", cmpVersions("0.1.8", "0.1.7") > 0);

@@ -58,8 +58,9 @@ export interface HubClientEvents {
   onSessionRenamed?: (session: SessionRecord) => void;
   onError?: (code: string, message: string) => void;
   /** The hub reports a build available at its update origin. Advisory: the UI
-   *  compares it to the running app version and may nag. Install stays gated. */
-  onUpdateAvailable?: (version: string) => void;
+   *  compares it to the running app version and may nag. Install stays gated.
+   *  `notes` is display-only change-notes text from the release manifest. */
+  onUpdateAvailable?: (version: string, notes?: string) => void;
   // --- enrollment (self-serve device join) ---
   /** Joining device: our request is pending — display this 6-digit code. */
   onEnrollWaiting?: (code: string) => void;
@@ -423,7 +424,7 @@ export class HubClient {
         this.events.onError?.(body.code, body.message);
         break;
       case "update.available":
-        this.events.onUpdateAvailable?.(body.version);
+        this.events.onUpdateAvailable?.(body.version, body.notes);
         break;
       default:
         break;

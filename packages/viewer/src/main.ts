@@ -464,6 +464,7 @@ function startApp(
   // the hub's next push equals our version, so the banner clears itself.
   let runningVersion = "";
   let offeredVersion = "";
+  let offeredNotes = "";
   let updating = false;
   let errored = false;
   const updateBanner = document.createElement("div");
@@ -475,7 +476,53 @@ function startApp(
   bannerBtn.className = "update-banner-btn";
   bannerBtn.textContent = "Restart to update";
   bannerBtn.addEventListener("click", () => void applyUpdate());
-  updateBanner.append(bannerText, bannerBtn);
+  // "What's changed" opens the release's change notes (pushed by the hub from
+  // the manifest). Shown only when the offered release actually carries notes.
+  const bannerNotesBtn = document.createElement("button");
+  bannerNotesBtn.className = "update-banner-btn";
+  bannerNotesBtn.textContent = "What's changed";
+  bannerNotesBtn.hidden = true;
+  bannerNotesBtn.addEventListener("click", () => showChangeNotes());
+  updateBanner.append(bannerText, bannerBtn, bannerNotesBtn);
+
+  // In-app modal with the offered release's change notes. Notes originate from
+  // the update origin's manifest, so they are untrusted display text: rendered
+  // via textContent only, never as markup.
+  let notesOverlay: HTMLElement | undefined;
+  function showChangeNotes(): void {
+    notesOverlay?.remove();
+    const overlay = document.createElement("div");
+    overlay.className = "tset-overlay";
+    const panel = document.createElement("div");
+    panel.className = "tset-panel";
+    panel.setAttribute("role", "dialog");
+    panel.tabIndex = -1;
+    const title = document.createElement("h2");
+    title.className = "tset-title";
+    title.textContent = `glass ${offeredVersion} — what's changed`;
+    const body = document.createElement("div");
+    body.className = "notes-body";
+    body.textContent = offeredNotes || "No change notes for this release.";
+    const closeBtn = document.createElement("button");
+    closeBtn.className = "update-banner-btn";
+    closeBtn.textContent = "Close";
+    const close = (): void => {
+      overlay.remove();
+      notesOverlay = undefined;
+    };
+    closeBtn.addEventListener("click", close);
+    overlay.addEventListener("mousedown", (ev) => {
+      if (ev.target === overlay) close();
+    });
+    panel.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") close();
+    });
+    panel.append(title, body, closeBtn);
+    overlay.append(panel);
+    document.body.append(overlay);
+    notesOverlay = overlay;
+    panel.focus();
+  }
 
   function refreshUpdateBanner(): void {
     // While an update is in flight OR has just failed, applyUpdate() owns the
@@ -492,6 +539,7 @@ function startApp(
       bannerText.textContent = `Glass ${offeredVersion} is available.`;
       bannerBtn.textContent = "Restart to update";
       bannerBtn.disabled = false;
+      bannerNotesBtn.hidden = !offeredNotes;
     }
   }
 
@@ -589,8 +637,9 @@ function startApp(
         statusText.textContent = `error: ${code} — ${message}`;
         if (code === "hub_identity") status.dataset["state"] = "error";
       },
-      onUpdateAvailable: (version) => {
+      onUpdateAvailable: (version, notes) => {
         offeredVersion = version;
+        offeredNotes = notes ?? "";
         refreshUpdateBanner();
       },
       // --- enrollment ---

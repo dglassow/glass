@@ -48,6 +48,9 @@ export type ProtocolError = z.infer<typeof ProtocolError>;
 export const UpdateAvailable = z.object({
   type: z.literal("update.available"),
   version: z.string().min(1).max(64),
+  /** Human-readable change notes for `version` (from the release manifest).
+   *  Advisory display text only — rendered as plain text, never markup. */
+  notes: z.string().max(16384).optional(),
 });
 export type UpdateAvailable = z.infer<typeof UpdateAvailable>;
 

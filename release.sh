@@ -136,13 +136,22 @@ console.log("  minisign signature verifies against the app's pinned pubkey");
 JS
 
   echo "› writing latest.json"
-  local endpoint url
+  # Change notes = commit subjects since the previous release tag. They ride the
+  # manifest's `notes` field; the hub pushes them with update.available and the
+  # banner's "What's changed" dialog shows them on every device. The bump
+  # commits themselves ("release: vX.Y.Z") are elided as noise.
+  local endpoint url prev notes
   endpoint="$(json_get "$TAURI_CONF" plugins.updater.endpoints.0)"
   url="${endpoint%latest.json}Glass.app.tar.gz"
-  node -e '
+  prev="$(git tag --list 'v*' --sort=-v:refname | grep -vx "v$ver" | head -1 || true)"
+  notes="$(git log --format='- %s' "${prev:+$prev..}HEAD" | grep -Ev '^- release: v[0-9]+\.[0-9]+\.[0-9]+$' || true)"
+  [ -n "$notes" ] && echo "  notes: $(printf '%s\n' "$notes" | wc -l | tr -d ' ') change(s) since ${prev:-the beginning}"
+  GLASS_RELEASE_NOTES="$notes" node -e '
     const { readFileSync, writeFileSync } = require("fs");
     const [dir, ver, url] = process.argv.slice(1);
+    const notes = (process.env.GLASS_RELEASE_NOTES ?? "").slice(0, 16384);
     const manifest = { version: ver, pub_date: new Date().toISOString().replace(/\.\d+Z$/, "Z"),
+      ...(notes ? { notes } : {}),
       platforms: { "darwin-aarch64": { signature: readFileSync(`${dir}/Glass.app.tar.gz.sig`, "utf8").trim(), url } } };
     writeFileSync(`${dir}/latest.json`, JSON.stringify(manifest, null, 2) + "\n");' "$stage" "$ver" "$url"
 

@@ -1,5 +1,20 @@
 #!/usr/bin/env bash
-# Release helper for Glass. Two steps, run on the Mac that builds the app:
+# Release helper for Glass, run on the Mac that builds the app.
+#
+#   ./release.sh ship 0.1.5     # the whole release, unattended: gate on
+#                               # typecheck+tests, bump, release commit, signed
+#                               # tag, backend bundle, tauri build, sign +
+#                               # notarize, package, publish, push, verify the
+#                               # hub is serving it
+#
+# `ship` never prompts: tag signing rides ssh-agent, notarization the
+# glass-notary Keychain profile — so it can run from a remote session with
+# nobody at the machine. It is resumable: if the release commit + tag are
+# already at HEAD (a previous ship died mid-build), it skips straight to the
+# build. Nothing is pushed until the artifacts are published, so a failed build
+# never leaves a public tag for a release that doesn't exist.
+#
+# The pieces remain runnable by hand:
 #
 #   ./release.sh bump 0.1.5     # sync the version into every release-stamped file
 #   (commit, sign the tag, build: bundle-backend.sh && tauri build && sign-and-notarize.sh)
@@ -50,7 +65,6 @@ bump() {
     echo "WARNING: cargo not found — run 'cargo update --workspace' in packages/desktop/src-tauri before committing" >&2
   fi
   check_versions "$ver"
-  echo "✓ bumped to $ver — commit, tag with 'git tag -s v$ver', then build + sign-and-notarize + './release.sh package'"
 }
 
 # Every place the version is stamped must agree, including the built app if present.
@@ -141,8 +155,70 @@ JS
   echo "✓ v$ver published — devices will see it at $url"
 }
 
+ship() {
+  local ver="$1"
+  [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "version must be plain semver (got '$ver')"
+  [ "$(git branch --show-current)" = "main" ] || die "ship only runs from main"
+  git diff-index --quiet HEAD -- || die "working tree has uncommitted changes — commit or stash first"
+
+  # Resume detection: a previous ship that died mid-build left the release
+  # commit + signed tag at HEAD. Anything else under an existing tag is a
+  # version-reuse mistake and refuses.
+  local resuming=0
+  if git rev-parse -q --verify "refs/tags/v$ver" >/dev/null; then
+    [ "$(git rev-parse "v$ver^{commit}")" = "$(git rev-parse HEAD)" ] \
+      || die "tag v$ver already exists and is not at HEAD — versions are never reused, pick the next one"
+    check_versions "$ver"
+    resuming=1
+    echo "› tag v$ver already at HEAD — resuming a previous ship"
+  else
+    local cur
+    cur="$(json_get release.json version)"
+    node -e 'const p=s=>s.split(".").map(Number);const[a,b]=[p(process.argv[1]),p(process.argv[2])];for(let i=0;i<3;i++){if(a[i]!==b[i])process.exit(a[i]>b[i]?0:1)};process.exit(1)' "$ver" "$cur" \
+      || die "version $ver is not greater than the current $cur — the anti-rollback floor would refuse it"
+  fi
+
+  # No prompts allowed later, so prove signing works before touching anything:
+  # the tag key must be in ssh-agent, the Developer ID in the Keychain.
+  printf 'probe' | ssh-keygen -Y sign -n glass-ship-probe -f "$(git config user.signingkey)" >/dev/null 2>&1 \
+    || die "ssh-agent can't sign with $(git config user.signingkey) — tag signing would hang"
+  security find-identity -v -p codesigning | grep -q "Developer ID Application" \
+    || die "no Developer ID Application identity in the Keychain"
+
+  echo "› typecheck + full test suite"
+  pnpm --silent build
+  pnpm --silent test
+
+  if [ "$resuming" = 0 ]; then
+    echo "› bump + release commit + signed tag"
+    bump "$ver"
+    git commit -qam "release: v$ver"
+    git tag -s "v$ver" -m "Glass v$ver"
+  fi
+
+  echo "› bundling backend"
+  packages/desktop/bundle-backend.sh
+  echo "› tauri build"
+  (cd packages/desktop && pnpm --silent tauri build)
+  packages/desktop/sign-and-notarize.sh
+  package
+
+  echo "› pushing main + v$ver to origin"
+  git push -q origin main "v$ver"
+
+  # Done-when: the exact URL devices poll serves the version we just shipped.
+  local endpoint served
+  endpoint="$(json_get "$TAURI_CONF" plugins.updater.endpoints.0)"
+  served="$(curl -fsS --max-time 30 "$endpoint" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).version))')" \
+    || die "published + pushed, but $endpoint is unreachable — is the hub/tunnel up?"
+  [ "$served" = "$ver" ] || die "hub serves $served, expected $ver — another publisher raced this ship?"
+  echo "✓ shipped v$ver — the hub is serving it; devices will show the update banner on their next check"
+}
+
 case "${1:-}" in
-  bump)    [ $# -eq 2 ] || die "usage: ./release.sh bump <version>"; bump "$2" ;;
+  bump)    [ $# -eq 2 ] || die "usage: ./release.sh bump <version>"; bump "$2"
+           echo "✓ bumped to $2 — commit, tag with 'git tag -s v$2', then build + sign-and-notarize + './release.sh package'" ;;
   package) shift; package "$@" ;;
-  *)       die "usage: ./release.sh bump <version> | ./release.sh package [Glass.app]" ;;
+  ship)    [ $# -eq 2 ] || die "usage: ./release.sh ship <version>"; ship "$2" ;;
+  *)       die "usage: ./release.sh ship <version> | ./release.sh bump <version> | ./release.sh package [Glass.app]" ;;
 esac

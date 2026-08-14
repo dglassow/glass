@@ -96,9 +96,10 @@ package() {
   xcrun stapler validate "$app" >/dev/null || die "no notarization staple — run sign-and-notarize.sh first"
 
   echo "› building the update tarball (no Apple metadata)"
-  local stage
+  # not `local`: the EXIT trap fires after this function returns, and under
+  # set -u an out-of-scope local made cleanup itself the thing that failed
   stage="$(mktemp -d)"
-  trap 'rm -rf "$stage"' EXIT
+  trap 'rm -rf "${stage:-}"' EXIT
   local tarball="$stage/Glass.app.tar.gz"
   COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -czf "$tarball" -C "$(dirname "$app")" "$(basename "$app")"
 
@@ -112,7 +113,9 @@ print(f"  raw stream clean: 0 AppleDouble entries")
 PY
 
   echo "› signing with the updater key"
-  (cd packages/desktop && pnpm --silent tauri signer sign -k "$UPDATER_KEY" "$tarball" >/dev/null)
+  # -f, not -k: -k takes the key as a STRING (a path silently fails to decode);
+  # </dev/null so a password-protected key fails loudly instead of prompting
+  (cd packages/desktop && pnpm --silent tauri signer sign -f "$UPDATER_KEY" -p "" "$tarball" >/dev/null </dev/null)
   [ -f "$tarball.sig" ] || die "tauri signer produced no .sig"
 
   # Cross-check the signature against the exact pubkey shipped inside the app —

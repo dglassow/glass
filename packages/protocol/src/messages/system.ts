@@ -28,6 +28,9 @@ export const ErrorCode = z.enum([
   "vault_locked",
   "biometric_required",
   "invalid_name",
+  "bad_request",
+  "imessage_unavailable",
+  "imessage_send_failed",
   "internal",
 ]);
 export type ErrorCode = z.infer<typeof ErrorCode>;

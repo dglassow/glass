@@ -38,8 +38,14 @@ import {
   type Envelope,
   type DeviceRole,
   type Signer,
+  type IMessageConversations,
+  type IMessageMessages,
+  type IMessageSend,
+  type IMessageWatch,
+  type IMessageUnwatch,
 } from "@glass/protocol";
 import { ProxyExit, ProxyForwarder } from "./proxy/index.js";
+import type { IMessageBridge } from "./imessage/index.js";
 
 const APP_VERSION = "0.0.0";
 const RECONNECT_MIN_MS = 250;
@@ -52,6 +58,8 @@ export interface HubLinkOptions {
   readonly deviceName: string;
   /** Etch presence, reported in the device record (detected, never managed). */
   readonly etch?: { present: boolean; version?: string };
+  /** iMessage bridge, when this Mac can serve one (detected, never assumed). */
+  readonly imessage?: IMessageBridge;
   /** Signs the hub's auth challenge. Omit only when the hub runs in --open mode. */
   readonly signer?: Signer;
   /** Pinned hub public key (mutual auth) — the hub must prove this identity, or we refuse. */
@@ -142,6 +150,62 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
     if (f) {
       forwarders.delete(deviceId);
       f.fwd.close();
+    }
+  }
+
+  // --- iMessage bridge (plan §6) ---
+  // Watchers are viewers that asked for new-message pushes. Point-to-point
+  // only — message content is never broadcast; it reaches exactly the viewers
+  // that subscribed on this connection. Soft state, pruned on disconnect.
+  const imessageWatchers = new Set<string>();
+  if (opts.imessage) {
+    opts.imessage.startPolling((message) => {
+      for (const w of imessageWatchers) toHub(w, { type: "imessage.new", message });
+    });
+  }
+
+  function handleIMessage(
+    viewer: string,
+    reqId: string,
+    body: IMessageConversations | IMessageMessages | IMessageSend | IMessageWatch | IMessageUnwatch,
+  ): void {
+    const bridge = opts.imessage;
+    const fail = (code: "imessage_unavailable" | "imessage_send_failed" | "bad_request" | "internal", message: string): void =>
+      toHub(viewer, { type: "error", code, message }, reqId);
+    if (!bridge) return fail("imessage_unavailable", "this device has no iMessage bridge");
+    try {
+      switch (body.type) {
+        case "imessage.conversations":
+          return toHub(viewer, { type: "imessage.conversations.listed", conversations: bridge.conversations(body.limit ?? 30) }, reqId);
+        case "imessage.messages":
+          return toHub(
+            viewer,
+            { type: "imessage.messages.listed", chatGuid: body.chatGuid, messages: bridge.messages(body.chatGuid, body.limit ?? 50, body.beforeRowid) },
+            reqId,
+          );
+        case "imessage.send": {
+          const target = body.chatGuid !== undefined ? { chatGuid: body.chatGuid } : body.handle !== undefined ? { handle: body.handle } : null;
+          if (!target || (body.chatGuid !== undefined && body.handle !== undefined)) {
+            return fail("bad_request", "imessage.send takes exactly one of chatGuid or handle");
+          }
+          // Audit trail (proxy-egress precedent): every send performed on this
+          // device's behalf, but never the message content.
+          console.error(`agent: imessage send for ${viewer} -> ${body.chatGuid ?? body.handle} (${body.text.length} chars)`);
+          void bridge
+            .send(target, body.text)
+            .then(() => toHub(viewer, { type: "imessage.sent", ok: true }, reqId))
+            .catch((err: unknown) => fail("imessage_send_failed", err instanceof Error ? err.message : String(err)));
+          return;
+        }
+        case "imessage.watch":
+          imessageWatchers.add(viewer);
+          return toHub(viewer, { type: "imessage.watching" }, reqId);
+        case "imessage.unwatch":
+          imessageWatchers.delete(viewer);
+          return;
+      }
+    } catch (err) {
+      fail("internal", err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -310,6 +374,13 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
         exits.get(viewer)?.handle(body);
         forwarders.get(viewer)?.fwd.handle(body);
         break;
+      case "imessage.conversations":
+      case "imessage.messages":
+      case "imessage.send":
+      case "imessage.watch":
+      case "imessage.unwatch":
+        handleIMessage(viewer, env.id, body);
+        break;
       case "device.state": {
         // A viewer went away: prune it so we don't fan out to a dead address,
         // and drop any proxy state bound to it (its exit channels, or the
@@ -317,6 +388,7 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
         if (body.device.state !== "connected") {
           pruneViewer(body.device.id);
           closeProxyPeer(body.device.id);
+          imessageWatchers.delete(body.device.id);
         }
         break;
       }
@@ -366,6 +438,7 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
         protocolVersion: PROTOCOL_VERSION,
         appVersion: APP_VERSION,
         etch: opts.etch ?? { present: false },
+        imessage: { present: !!opts.imessage },
         ...(opts.hubKey ? { clientNonce, channelBinding: true } : {}),
       };
       ws.send(JSON.stringify(makeEnvelope({ id: randomUUID(), ts: Date.now(), from: self, to: HUB, body: helloBody })));
@@ -434,6 +507,8 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
     close: () =>
       new Promise<void>((resolve) => {
         closed = true;
+        opts.imessage?.stopPolling();
+        imessageWatchers.clear();
         for (const e of exits.values()) e.closeAll();
         exits.clear();
         for (const f of forwarders.values()) f.fwd.close();

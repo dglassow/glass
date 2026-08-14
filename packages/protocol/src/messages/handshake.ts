@@ -18,6 +18,9 @@ export const Hello = z.object({
   appVersion: z.string(),
   /** Present and at what version, or absent. Glass detects Etch, never manages it. */
   etch: z.object({ present: z.boolean(), version: z.string().optional() }),
+  /** iMessage bridge availability (macOS + readable Messages DB). Optional so
+   *  pre-iMessage peers stay valid (additive, version rule §14). */
+  imessage: z.object({ present: z.boolean() }).optional(),
   /** A fresh spoke nonce; its presence asks the hub to prove its own identity (mutual auth). */
   clientNonce: z.string().optional(),
   /** The spoke can bind the hub proof to the TLS channel (Node clients; browsers cannot). */

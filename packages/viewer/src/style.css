@@ -33,9 +33,11 @@ body {
   display: grid;
   grid-template-columns: 240px 1fr;
 }
-/* Main layout with the right-side ribbon mounted (onboarding screens keep 2 cols). */
+/* Main layout with the right-side ribbon mounted (onboarding screens keep 2
+   cols). The extra auto track is the Messages dock — display:none (hidden)
+   when closed, so the empty track collapses to 0. */
 #app.has-ribbon {
-  grid-template-columns: 240px 1fr auto;
+  grid-template-columns: 240px 1fr auto auto;
 }
 
 .sidebar {
@@ -839,6 +841,81 @@ button.tset-done:hover { background: #1d2536; }
 .skill-icon-input { width: 64px; }
 .skill-enter { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 6px; }
 
+/* ---- Messages dock (imessage-panel.ts) ---------------------------------- */
+
+.msg-dock {
+  width: 320px;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.msg-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.msg-title { font-weight: 600; flex: 1; }
+.msg-agent {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: 12px/1.4 inherit;
+  max-width: 140px;
+}
+.msg-close { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 13px; }
+.msg-close:hover { color: var(--fg); }
+.msg-body { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y: auto; }
+.msg-error { color: #e06c75; font-size: 11px; padding: 2px 10px 6px; white-space: pre-wrap; word-break: break-word; }
+.msg-error:empty { display: none; }
+.msg-empty { color: var(--muted); font-size: 12px; padding: 16px 12px; }
+.msg-new { margin: 8px 10px 4px; align-self: flex-start; }
+.msg-hint { color: var(--muted); font-size: 11px; line-height: 1.4; }
+
+.msg-conv { padding: 8px 12px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.msg-conv:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); }
+.msg-conv-top { display: flex; justify-content: space-between; gap: 8px; }
+.msg-conv-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msg-conv-time { color: var(--muted); font-size: 11px; flex: none; }
+.msg-conv-preview { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.msg-thread-head { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+.msg-back { background: none; border: none; color: var(--fg); cursor: pointer; font-size: 16px; padding: 0 4px; }
+.msg-thread-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msg-thread { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding: 10px; min-height: 0; }
+.msg-earlier { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 11px; align-self: center; }
+.msg-bubble {
+  max-width: 85%;
+  align-self: flex-start;
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  border-radius: 10px;
+  padding: 6px 9px;
+}
+.msg-bubble[data-me="true"] { align-self: flex-end; background: color-mix(in srgb, #4c8dff 30%, transparent); }
+.msg-bubble[data-pending="true"] { opacity: 0.6; }
+.msg-bubble-text { white-space: pre-wrap; word-break: break-word; font-size: 12.5px; }
+.msg-bubble-meta { color: var(--muted); font-size: 10px; margin-top: 2px; }
+.msg-compose { display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--line); }
+.msg-compose textarea,
+.msg-compose-new textarea,
+.msg-compose-new input {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: 12px/1.4 inherit;
+  flex: 1;
+  resize: none;
+}
+.msg-compose-new { display: flex; flex-direction: column; gap: 8px; padding: 10px; }
+.msg-compose-new button { align-self: flex-end; }
+
 /* Extensions manager (extensions-ui.ts, inside .tset-panel) — the import
    textarea; rows/foot reuse the .ribbon-config chrome. */
 .ribbon-config textarea {
@@ -867,6 +944,7 @@ button.tset-done:hover { background: #1d2536; }
   #app,
   #app.has-ribbon { grid-template-columns: 1fr; }
   .ribbon { display: none; }
+  .msg-dock { display: none; } /* the PWA tier is chat-only; phones have Messages */
 
   .sidebar {
     position: fixed;

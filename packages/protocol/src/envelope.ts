@@ -7,6 +7,7 @@ import { SystemMessage } from "./messages/system.js";
 import { CredentialMessage } from "./messages/credential.js";
 import { VaultMessage } from "./messages/vault.js";
 import { ProxyMessage } from "./messages/proxy.js";
+import { IMessageMessage } from "./messages/imessage.js";
 
 /** Every message on the wire is one of these. */
 export const Body = z.union([
@@ -17,6 +18,7 @@ export const Body = z.union([
   CredentialMessage,
   VaultMessage,
   ProxyMessage,
+  IMessageMessage,
 ]);
 export type Body = z.infer<typeof Body>;
 

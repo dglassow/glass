@@ -35,6 +35,7 @@ import { skillInput, type Skill } from "./skills.js";
 import { loadSkills, openSkillsEditor } from "./skills-ui.js";
 import { ExtensionHost } from "./extension-host.js";
 import { loadExtensions, openExtensionsManager } from "./extensions-ui.js";
+import { IMessagePanel } from "./imessage-panel.js";
 import { DeviceId, type DeviceRecord, type DeviceRole, type EnrollCompanion } from "@glass/protocol";
 
 /** Build the enrollment config for a spoke: enroll the viewer, with the local
@@ -650,6 +651,7 @@ function startApp(
         offeredNotes = notes ?? "";
         refreshUpdateBanner();
       },
+      onIMessageNew: (agentId, message) => msgPanel.onNew(agentId, message),
       // --- enrollment ---
       onEnrollWaiting: (code) => showJoinWaiting(code),          // this device is joining
       onEnrollApproved: () => clearJoinOverlay(),                 // trusted now; client reconnects
@@ -732,6 +734,35 @@ function startApp(
   // normal launch must never override the user's unpin.
   let extIds = new Set(loadExtensions().map((e) => e.id));
   const freshExtIds = new Set<string>();
+  // Messages dock (plan §6): browses/answers the iMessages of whichever fleet
+  // Mac serves the bridge. The ribbon widget appears only while such an agent
+  // is connected; it auto-pins once (first sighting), then the user's
+  // arrangement is respected. Desktop layout only (hidden <720px).
+  const msgPanel = new IMessagePanel(client);
+  let msgWidgetRegistered = false;
+  function syncMessagesWidget(): void {
+    const capable = latestDevices
+      .filter((d) => d.imessagePresent === true && d.roles.includes("agent") && d.state === "connected")
+      .map((d) => ({ id: d.id, name: d.name }));
+    msgPanel.setAgents(capable);
+    if (capable.length > 0 && !msgWidgetRegistered) {
+      msgWidgetRegistered = true;
+      ribbon.register({ id: "messages", title: "Messages", icon: "💬", activate: () => msgPanel.toggle() });
+      let pinnedOnce = false;
+      try {
+        pinnedOnce = localStorage.getItem("glass.imsg.pinned") === "1";
+        localStorage.setItem("glass.imsg.pinned", "1");
+      } catch {
+        /* private mode — pin every launch rather than never */
+      }
+      if (!pinnedOnce) ribbon.pin("messages");
+    } else if (capable.length === 0 && msgWidgetRegistered) {
+      msgWidgetRegistered = false;
+      ribbon.unregister("messages");
+      if (msgPanel.isOpen) msgPanel.close();
+    }
+  }
+
   const extHost = new ExtensionHost({
     sessionList: () => workspace.sessionList(),
     typeInFocused: (text) => {
@@ -750,7 +781,7 @@ function startApp(
   });
   extHost.sync(loadExtensions());
 
-  app.append(sidebar, workspace.el, ribbon.el, menuBtn, backdrop, updateBanner);
+  app.append(sidebar, workspace.el, msgPanel.el, ribbon.el, menuBtn, backdrop, updateBanner);
 
   async function refreshDevices(): Promise<void> {
     try {
@@ -896,6 +927,7 @@ function startApp(
 
   /** Sidebar: each agent (device) with its sessions nested beneath it. */
   function renderSidebar(): void {
+    syncMessagesWidget();
     deviceList.replaceChildren();
     const agents = latestDevices.filter((d) => d.roles.includes("agent"));
     const sessions = workspace.sessionList();

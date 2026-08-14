@@ -31,6 +31,8 @@ import {
   type SessionRecord,
   type SessionKind,
   type Signer,
+  type IMessageConversation,
+  type IMessageItem,
 } from "@glass/protocol";
 
 /** Lets an untrusted device self-enroll (number match) instead of failing. */
@@ -57,6 +59,8 @@ export interface HubClientEvents {
   /** A session anywhere in the fleet was renamed (session.rename broadcast). */
   onSessionRenamed?: (session: SessionRecord) => void;
   onError?: (code: string, message: string) => void;
+  /** A new iMessage appeared on a watched agent (either direction). */
+  onIMessageNew?: (agentId: string, message: IMessageItem) => void;
   /** The hub reports a build available at its update origin. Advisory: the UI
    *  compares it to the running app version and may nag. Install stays gated.
    *  `notes` is display-only change-notes text from the release manifest. */
@@ -257,6 +261,59 @@ export class HubClient {
     return env.body.port;
   }
 
+  // --- iMessage bridge (plan §6) — served by an agent whose Mac is signed
+  // --- into Messages (device record: imessagePresent). All display text in
+  // --- the results is untrusted; render via textContent only.
+
+  async listIMessageConversations(agentId: string, limit?: number): Promise<IMessageConversation[]> {
+    const env = await this.request(agentId, { type: "imessage.conversations", ...(limit !== undefined ? { limit } : {}) });
+    if (env.body.type !== "imessage.conversations.listed") throw requestError(env, "imessage conversations");
+    return env.body.conversations;
+  }
+
+  async listIMessageMessages(
+    agentId: string,
+    chatGuid: string,
+    opts: { limit?: number; beforeRowid?: number } = {},
+  ): Promise<IMessageItem[]> {
+    const env = await this.request(agentId, {
+      type: "imessage.messages",
+      chatGuid,
+      ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
+      ...(opts.beforeRowid !== undefined ? { beforeRowid: opts.beforeRowid } : {}),
+    });
+    if (env.body.type !== "imessage.messages.listed") throw requestError(env, "imessage messages");
+    return env.body.messages;
+  }
+
+  /** Send a message: `{chatGuid}` replies into an existing conversation
+   *  (reliable), `{handle}` targets an address (best-effort new thread). The
+   *  long timeout leaves room for macOS's one-time Automation consent prompt. */
+  async sendIMessage(agentId: string, target: { chatGuid?: string; handle?: string }, text: string): Promise<void> {
+    const env = await this.request(
+      agentId,
+      {
+        type: "imessage.send",
+        ...(target.chatGuid !== undefined ? { chatGuid: target.chatGuid } : {}),
+        ...(target.handle !== undefined ? { handle: target.handle } : {}),
+        text,
+      },
+      30000,
+    );
+    if (env.body.type !== "imessage.sent") throw requestError(env, "imessage send");
+  }
+
+  /** Subscribe this connection to the agent's new-message pushes (idempotent;
+   *  re-send after reconnects — watcher state is agent-worker soft state). */
+  async watchIMessages(agentId: string): Promise<void> {
+    const env = await this.request(agentId, { type: "imessage.watch" });
+    if (env.body.type !== "imessage.watching") throw requestError(env, "imessage watch");
+  }
+
+  unwatchIMessages(agentId: string): void {
+    this.rawSend(this.deviceId, agentId, { type: "imessage.unwatch" });
+  }
+
   input(agentId: string, sessionId: string, data: string): void {
     this.rawSend(this.deviceId, agentId, { type: "session.input", sessionId: SessionId.parse(sessionId), data });
   }
@@ -425,6 +482,9 @@ export class HubClient {
         break;
       case "update.available":
         this.events.onUpdateAvailable?.(body.version, body.notes);
+        break;
+      case "imessage.new":
+        this.events.onIMessageNew?.(env.from, body.message);
         break;
       default:
         break;

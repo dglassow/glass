@@ -12,6 +12,7 @@ import { spawnSync } from "node:child_process";
 import { startAgent } from "./relay.js";
 import { startHubLink } from "./hub-link.js";
 import { loadOrCreateSigner } from "./keystore.js";
+import { detectIMessage, IMessageBridge } from "./imessage/index.js";
 
 /** Detect the Etch CLI (detected, never managed — plan §0). */
 function detectEtch(): { present: boolean; version?: string } {
@@ -102,12 +103,25 @@ async function main(): Promise<void> {
       process.exit(2);
     }
     const signer = args.key ? await loadOrCreateSigner(args.key, args.deviceId) : undefined;
+    // iMessage bridge (plan §6): detected, never assumed — macOS + readable
+    // chat.db (Full Disk Access). Absent permission just means no bridge here.
+    let imessage: IMessageBridge | undefined;
+    const imDet = detectIMessage();
+    if (imDet.present && imDet.dbPath) {
+      try {
+        imessage = new IMessageBridge(imDet.dbPath);
+        console.error("agent: imessage bridge available");
+      } catch {
+        imessage = undefined;
+      }
+    }
     const link = await startHubLink({
       sessiondPath: args.sessiond,
       hubUrl: args.hub,
       deviceId: args.deviceId,
       deviceName: args.name,
       etch: detectEtch(),
+      ...(imessage ? { imessage } : {}),
       ...(signer ? { signer } : {}),
       ...(args.hubKey ? { hubKey: args.hubKey } : {}),
       ...(args.insecureTls ? { insecureTls: true } : {}),

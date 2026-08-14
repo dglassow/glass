@@ -15,6 +15,8 @@ export const DeviceRecord = z.object({
   lastSeen: z.number().int().nonnegative(),
   appVersion: z.string().optional(),
   etchPresent: z.boolean().optional(),
+  /** The device can serve the iMessage bridge (detected, never assumed). */
+  imessagePresent: z.boolean().optional(),
 });
 export type DeviceRecord = z.infer<typeof DeviceRecord>;
 

@@ -11,3 +11,4 @@ export * from "./messages/system.js";
 export * from "./messages/credential.js";
 export * from "./messages/vault.js";
 export * from "./messages/proxy.js";
+export * from "./messages/imessage.js";

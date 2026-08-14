@@ -99,6 +99,7 @@ interface PendingProof {
   appVersion: string;
   etchPresent: boolean;
   imessagePresent: boolean;
+  imessageAccount?: string;
 }
 
 interface PendingEnroll {
@@ -326,6 +327,7 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
       appVersion: pp.appVersion,
       etchPresent: pp.etchPresent,
       imessagePresent: pp.imessagePresent,
+      ...(pp.imessageAccount !== undefined ? { imessageAccount: pp.imessageAccount } : {}),
     };
     registry.set(pp.deviceId, { socket, record, epoch });
     reply(
@@ -381,6 +383,7 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
           deviceId: hello.deviceId, nonce: "", publicKey: "", helloId: env.id,
           name: openModeNames.get(hello.deviceId) ?? hello.deviceName, roles: hello.roles, appVersion: hello.appVersion, etchPresent: hello.etch.present,
           imessagePresent: hello.imessage?.present ?? false,
+          ...(hello.imessage?.account !== undefined ? { imessageAccount: hello.imessage.account } : {}),
         };
         epoch = registerAuthenticated(socket, pendingProof);
         deviceId = hello.deviceId;
@@ -398,6 +401,7 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
         deviceId: hello.deviceId, nonce, publicKey: trusted.publicKey, helloId: env.id,
         name: trusted.name, roles: trusted.roles, appVersion: hello.appVersion, etchPresent: hello.etch.present,
         imessagePresent: hello.imessage?.present ?? false,
+        ...(hello.imessage?.account !== undefined ? { imessageAccount: hello.imessage.account } : {}),
       };
       state = "await-proof";
 

@@ -438,7 +438,7 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
         protocolVersion: PROTOCOL_VERSION,
         appVersion: APP_VERSION,
         etch: opts.etch ?? { present: false },
-        imessage: { present: !!opts.imessage },
+        imessage: { present: !!opts.imessage, ...(opts.imessage?.account !== undefined ? { account: opts.imessage.account } : {}) },
         ...(opts.hubKey ? { clientNonce, channelBinding: true } : {}),
       };
       ws.send(JSON.stringify(makeEnvelope({ id: randomUUID(), ts: Date.now(), from: self, to: HUB, body: helloBody })));

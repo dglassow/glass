@@ -47,9 +47,14 @@ export class IMessageBridge {
   private readonly db: ChatDb;
   private timer: ReturnType<typeof setInterval> | null = null;
   private cursor = 0;
+  /** Signed-in account label (from chat.db), or undefined when undetectable.
+   *  Computed once — it can't change without a re-login, which also restarts
+   *  Messages' database activity and, in practice, the owner's session. */
+  readonly account: string | undefined;
 
   constructor(dbPath: string) {
     this.db = ChatDb.open(dbPath);
+    this.account = this.db.account();
   }
 
   conversations(limit: number): IMessageConversation[] {

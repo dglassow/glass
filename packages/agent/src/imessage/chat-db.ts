@@ -132,6 +132,30 @@ export class ChatDb {
       .reverse();
   }
 
+  /**
+   * The iMessage account this store belongs to — the most common
+   * `chat.account_login` (values look like "E:user@example.com" or
+   * "P:+15551234567"; the prefix is stripped). Lets viewers tell same-account
+   * mirrors apart from different-account Macs. Defensive: the column may be
+   * absent in older schemas → undefined, never a throw.
+   */
+  account(): string | undefined {
+    try {
+      const r = this.db
+        .prepare(
+          `SELECT account_login AS a, COUNT(*) AS n FROM chat
+           WHERE account_login IS NOT NULL AND account_login != ''
+           GROUP BY account_login ORDER BY n DESC LIMIT 1`,
+        )
+        .all()[0] as Record<string, unknown> | undefined;
+      const raw = typeof r?.["a"] === "string" ? r["a"] : "";
+      const stripped = raw.replace(/^[EP]:/i, "").trim();
+      return stripped ? stripped.slice(0, 256) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   /** Highest message ROWID — the new-message poller's cursor. */
   maxRowid(): number {
     const r = this.db.prepare(`SELECT COALESCE(MAX(ROWID), 0) AS m FROM message`).all()[0] as Record<string, unknown> | undefined;

@@ -18,5 +18,5 @@
     "outDir": "dist",
     "rootDir": "src"
   },
-  "include": ["src/hub-client.ts", "src/update-policy.ts", "src/ribbon-model.ts", "src/skills.ts", "src/extensions.ts"]
+  "include": ["src/hub-client.ts", "src/update-policy.ts", "src/ribbon-model.ts", "src/skills.ts", "src/extensions.ts", "src/imessage-model.ts"]
 }

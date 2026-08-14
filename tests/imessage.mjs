@@ -59,7 +59,7 @@ const T0 = Date.now() - 60 * 60 * 1000; // an hour ago, stable ordering
 function buildChatDb() {
   const db = new DatabaseSync(DB);
   db.exec(`
-    CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, chat_identifier TEXT, display_name TEXT);
+    CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, chat_identifier TEXT, display_name TEXT, account_login TEXT);
     CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
     CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
     CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
@@ -67,8 +67,8 @@ function buildChatDb() {
       handle_id INTEGER, date INTEGER, is_from_me INTEGER, cache_has_attachments INTEGER,
       associated_message_type INTEGER, item_type INTEGER);
   `);
-  db.exec(`INSERT INTO chat VALUES (1, 'iMessage;-;+15550001111', '+15550001111', NULL);
-           INSERT INTO chat VALUES (2, 'iMessage;+;chat-family', 'chat-family', 'Family');
+  db.exec(`INSERT INTO chat VALUES (1, 'iMessage;-;+15550001111', '+15550001111', NULL, 'E:me@example.com');
+           INSERT INTO chat VALUES (2, 'iMessage;+;chat-family', 'chat-family', 'Family', 'E:me@example.com');
            INSERT INTO handle VALUES (1, '+15550001111');
            INSERT INTO handle VALUES (2, '+15550002222');
            INSERT INTO handle VALUES (3, 'alice@example.com');
@@ -150,6 +150,35 @@ async function run() {
     && decodeAttributedBody(null) === null
     && decodeAttributedBody(Buffer.concat([Buffer.from("NSString"), Buffer.from([0x2b, 0xff, 0x01])])) === null);
 
+  // --- unit: account-aware agent pick (pure, from the built viewer lib) ---
+  // Same account on two Macs = mirrored stores, seamless failover; different
+  // or unknown accounts must never be hopped between silently.
+  const { pickAgent, agentLabel } = await import(new URL("../packages/viewer/dist/imessage-model.js", import.meta.url).href);
+  const A = { id: "a", name: "Mac A", account: "me@x.com" };
+  const A2 = { id: "a2", name: "Mac A2", account: "ME@X.COM" };
+  const B = { id: "b", name: "Mac B", account: "work@x.com" };
+  const U = { id: "u", name: "Mystery" };
+  check("pick: keeps the current agent when still present", (() => {
+    const p = pickAgent("b", "work@x.com", [A, B]);
+    return p.agent.id === "b" && !p.failedOver && !p.changedAccount;
+  })());
+  check("pick: same-account mirror fails over seamlessly (case-insensitive)", (() => {
+    const p = pickAgent("a", "me@x.com", [B, A2]);
+    return p.agent.id === "a2" && p.failedOver && !p.changedAccount;
+  })());
+  check("pick: a different account never silently continues", (() => {
+    const p = pickAgent("a", "me@x.com", [B]);
+    return p.agent.id === "b" && p.failedOver && p.changedAccount;
+  })());
+  check("pick: unknown accounts can't be proven mirrors -> changedAccount", (() => {
+    const p = pickAgent("u", undefined, [{ id: "u2", name: "Other Mystery" }]);
+    return p.agent.id === "u2" && p.failedOver && p.changedAccount;
+  })());
+  check("pick: fresh pick is not a failover; empty fleet -> null",
+    (() => { const p = pickAgent(null, undefined, [A]); return p.agent.id === "a" && !p.failedOver && !p.changedAccount; })()
+    && pickAgent("a", "me@x.com", []) === null);
+  check("pick: labels carry the account when known", agentLabel(A) === "Mac A — me@x.com" && agentLabel(U) === "Mystery");
+
   // --- synthetic store + stub send binary ---
   liveDb = buildChatDb();
   writeFileSync(SEND_BIN, `#!/usr/bin/env node\nrequire("fs").appendFileSync(${JSON.stringify(SEND_LOG)}, JSON.stringify(process.argv.slice(2)) + "\\n");\n`, { mode: 0o755 });
@@ -185,6 +214,7 @@ async function run() {
   const devA = listed.devices.find((d) => d.id === "mac-a");
   const devB = listed.devices.find((d) => d.id === "mac-b");
   check("device record: mac-a imessagePresent, mac-b absent", devA?.imessagePresent === true && devB?.imessagePresent === false);
+  check("device record: signed-in account detected, E: prefix stripped", devA?.imessageAccount === "me@example.com" && devB?.imessageAccount === undefined);
   const noBridge = await req(vA, "mac-b", { type: "imessage.conversations" });
   check("bridge-less agent fails closed (imessage_unavailable)", noBridge.type === "error" && noBridge.code === "imessage_unavailable");
 

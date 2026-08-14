@@ -17,6 +17,10 @@ export const DeviceRecord = z.object({
   etchPresent: z.boolean().optional(),
   /** The device can serve the iMessage bridge (detected, never assumed). */
   imessagePresent: z.boolean().optional(),
+  /** The bridge's signed-in account, when detectable. Same account on two
+   *  Macs = mirrored stores (viewers may fail over between them); different
+   *  or unknown accounts must never be switched between silently. */
+  imessageAccount: z.string().optional(),
 });
 export type DeviceRecord = z.infer<typeof DeviceRecord>;
 

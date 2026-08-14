@@ -743,7 +743,7 @@ function startApp(
   function syncMessagesWidget(): void {
     const capable = latestDevices
       .filter((d) => d.imessagePresent === true && d.roles.includes("agent") && d.state === "connected")
-      .map((d) => ({ id: d.id, name: d.name }));
+      .map((d) => ({ id: d.id, name: d.name, ...(d.imessageAccount !== undefined ? { account: d.imessageAccount } : {}) }));
     msgPanel.setAgents(capable);
     if (capable.length > 0 && !msgWidgetRegistered) {
       msgWidgetRegistered = true;

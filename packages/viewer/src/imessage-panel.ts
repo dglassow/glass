@@ -15,11 +15,9 @@
  */
 import type { HubClient } from "./hub-client.js";
 import type { IMessageConversation, IMessageItem } from "@glass/protocol";
+import { agentLabel, pickAgent, type BridgeAgent } from "./imessage-model.js";
 
-export interface IMessageAgent {
-  id: string;
-  name: string;
-}
+export type IMessageAgent = BridgeAgent;
 
 const CONV_LIMIT = 30;
 const PAGE_LIMIT = 50;
@@ -33,6 +31,9 @@ export class IMessagePanel {
 
   private agents: IMessageAgent[] = [];
   private agentId: string | null = null;
+  /** Account of the selected agent, captured at selection time — still known
+   *  after that agent drops out of the list (the failover decision needs it). */
+  private currentAccount: string | undefined;
   private convs: IMessageConversation[] = [];
   private chat: { guid: string; name: string } | null = null;
   private items: IMessageItem[] = [];
@@ -56,9 +57,14 @@ export class IMessagePanel {
     this.agentSelect.className = "msg-agent";
     this.agentSelect.setAttribute("aria-label", "device whose messages to show");
     this.agentSelect.addEventListener("change", () => {
-      this.agentId = this.agentSelect.value || null;
+      const prev = this.agentId;
+      const next = this.agentSelect.value || null;
+      if (prev && prev !== next) this.client.unwatchIMessages(prev);
+      this.agentId = next;
+      this.currentAccount = this.agents.find((a) => a.id === next)?.account;
       this.chat = null;
       this.view = "convs";
+      this.note("");
       void this.refresh();
     });
     const closeBtn = document.createElement("button");
@@ -96,28 +102,57 @@ export class IMessagePanel {
     if (this.agentId) this.client.unwatchIMessages(this.agentId);
   }
 
-  /** Fleet update: which connected agents can serve the bridge. Keeps the
-   *  selection stable when possible, re-arms the watch (idempotent). */
+  /**
+   * Fleet update: which connected agents can serve the bridge, and which
+   * account each serves. Selection is stability-first; on loss of the
+   * current Mac, a SAME-account mirror takes over seamlessly (the open
+   * thread reloads from it — mirrored store, same conversations), while a
+   * different/unknown account NEVER takes over silently: the panel resets to
+   * the conversation list and says whose mailbox it now shows.
+   */
   setAgents(agents: IMessageAgent[]): void {
     this.agents = agents;
-    const keep = this.agentId && agents.some((a) => a.id === this.agentId);
-    if (!keep) {
-      this.agentId = agents[0]?.id ?? null;
-      this.chat = null;
-      this.view = "convs";
-    }
+    const prevId = this.agentId;
+    const pick = pickAgent(this.agentId, this.currentAccount, agents);
+
     this.agentSelect.replaceChildren();
     for (const a of agents) {
       const opt = document.createElement("option");
       opt.value = a.id;
-      opt.textContent = a.name;
+      opt.textContent = agentLabel(a); // "Name — account": the mailbox is legible at a glance
       this.agentSelect.append(opt);
     }
-    if (this.agentId) this.agentSelect.value = this.agentId;
-    this.agentSelect.hidden = agents.length <= 1;
-    if (this.isOpen) {
-      if (!keep) void this.refresh();
-      else this.ensureWatch();
+    this.agentSelect.hidden = agents.length === 0;
+
+    if (!pick) {
+      this.agentId = null;
+      this.currentAccount = undefined;
+      this.chat = null;
+      this.view = "convs";
+      if (this.isOpen) this.renderView();
+      return;
+    }
+    this.agentId = pick.agent.id;
+    this.currentAccount = pick.agent.account;
+    this.agentSelect.value = pick.agent.id;
+
+    if (pick.failedOver && !pick.changedAccount) {
+      // Same-account mirror: keep the thread, reload it from the new Mac.
+      this.note(`${pick.agent.name} took over (same account)`);
+      if (this.isOpen) {
+        this.ensureWatch();
+        if (this.view === "thread" && this.chat) void this.reloadThread();
+        void this.loadConversations(this.view === "convs");
+      }
+    } else if (pick.changedAccount) {
+      this.chat = null;
+      this.view = "convs";
+      this.note(`device went offline — now showing ${agentLabel(pick.agent)}`);
+      if (this.isOpen) void this.refresh();
+    } else if (prevId === null) {
+      if (this.isOpen) void this.refresh(); // first capable agent appeared
+    } else {
+      if (this.isOpen) this.ensureWatch(); // unchanged selection — re-arm (worker swaps)
     }
   }
 
@@ -172,7 +207,7 @@ export class IMessagePanel {
       const convs = await this.client.listIMessageConversations(agentId, CONV_LIMIT);
       if (seq !== this.seq && !render) return;
       this.convs = convs;
-      this.errorEl.textContent = "";
+      this.clearError();
       if (this.view === "convs") this.renderView();
     } catch (err) {
       this.fail(err);
@@ -180,18 +215,25 @@ export class IMessagePanel {
   }
 
   private async openChat(conv: IMessageConversation): Promise<void> {
-    const agentId = this.agentId;
-    if (!agentId) return;
     this.chat = { guid: conv.guid, name: conv.name };
     this.items = [];
     this.view = "thread";
-    const seq = ++this.seq;
     this.renderView();
+    await this.reloadThread();
+  }
+
+  /** (Re)load the open thread from the CURRENT agent — also the same-account
+   *  failover path: a mirrored store serves the same chat guids. */
+  private async reloadThread(): Promise<void> {
+    const agentId = this.agentId;
+    const chat = this.chat;
+    if (!agentId || !chat) return;
+    const seq = ++this.seq;
     try {
-      const items = await this.client.listIMessageMessages(agentId, conv.guid, { limit: PAGE_LIMIT });
-      if (seq !== this.seq) return;
+      const items = await this.client.listIMessageMessages(agentId, chat.guid, { limit: PAGE_LIMIT });
+      if (seq !== this.seq || this.view !== "thread") return;
       this.items = items;
-      this.errorEl.textContent = "";
+      this.clearError();
       this.renderView();
     } catch (err) {
       this.fail(err);
@@ -220,7 +262,7 @@ export class IMessagePanel {
     if (!agentId || !text.trim()) return;
     try {
       await this.client.sendIMessage(agentId, target, text);
-      this.errorEl.textContent = "";
+      this.clearError();
       // Optimistic bubble until the poller's push replaces it (~2s).
       if (this.view === "thread" && this.chat && target.chatGuid === this.chat.guid) {
         this.items.push({
@@ -240,7 +282,20 @@ export class IMessagePanel {
   }
 
   private fail(err: unknown): void {
+    this.errorEl.dataset["kind"] = "error";
     this.errorEl.textContent = err instanceof Error ? err.message : String(err);
+  }
+
+  /** Informational status (e.g. failover notes) — same line, muted styling. */
+  private note(text: string): void {
+    this.errorEl.dataset["kind"] = "note";
+    this.errorEl.textContent = text;
+  }
+
+  /** Success path: clear a stale ERROR, but leave informational notes up —
+   *  "Mac B took over" must survive the very reload it announces. */
+  private clearError(): void {
+    if (this.errorEl.dataset["kind"] !== "note") this.errorEl.textContent = "";
   }
 
   // --- rendering ----------------------------------------------------------

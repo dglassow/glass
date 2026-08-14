@@ -19,8 +19,11 @@ export const Hello = z.object({
   /** Present and at what version, or absent. Glass detects Etch, never manages it. */
   etch: z.object({ present: z.boolean(), version: z.string().optional() }),
   /** iMessage bridge availability (macOS + readable Messages DB). Optional so
-   *  pre-iMessage peers stay valid (additive, version rule §14). */
-  imessage: z.object({ present: z.boolean() }).optional(),
+   *  pre-iMessage peers stay valid (additive, version rule §14). `account` is
+   *  the signed-in iMessage account when detectable — it lets viewers treat
+   *  same-account Macs as mirrors (safe failover) and refuse to silently hop
+   *  across different accounts. */
+  imessage: z.object({ present: z.boolean(), account: z.string().min(1).max(256).optional() }).optional(),
   /** A fresh spoke nonce; its presence asks the hub to prove its own identity (mutual auth). */
   clientNonce: z.string().optional(),
   /** The spoke can bind the hub proof to the TLS channel (Node clients; browsers cannot). */

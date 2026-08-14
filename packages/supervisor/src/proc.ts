@@ -20,7 +20,10 @@ export class Worker {
     readonly generation: number,
     private readonly onStatus?: (line: string) => void,
   ) {
-    this.cp = spawn("node", [entry, ...args], { stdio: ["pipe", "inherit", "inherit", "pipe"] });
+    this.cp = spawn(process.execPath, [entry, ...args], { stdio: ["pipe", "inherit", "inherit", "pipe"] });
+    this.cp.stdin?.on("error", () => {
+      /* the worker may exit between a liveness check and a control write */
+    });
     const status = this.cp.stdio[3] as Readable | null;
     status?.on("data", (d: Buffer) => this.ingest(d.toString("utf8")));
     this.cp.once("exit", (code) => {
@@ -54,8 +57,21 @@ export class Worker {
     if (this.ready) return Promise.resolve();
     if (this.failure) return Promise.reject(new Error(this.failure));
     return new Promise<void>((res, rej) => {
-      const timer = setTimeout(() => rej(new Error("health-check timeout")), timeoutMs);
-      this.waiters.push({ res: () => (clearTimeout(timer), res()), rej: (e) => (clearTimeout(timer), rej(e)) });
+      const waiter = {
+        res: (): void => {
+          clearTimeout(timer);
+          res();
+        },
+        rej: (e: Error): void => {
+          clearTimeout(timer);
+          rej(e);
+        },
+      };
+      const timer = setTimeout(() => {
+        this.waiters = this.waiters.filter((w) => w !== waiter);
+        rej(new Error("health-check timeout"));
+      }, timeoutMs);
+      this.waiters.push(waiter);
     });
   }
 
@@ -64,6 +80,9 @@ export class Worker {
   }
   get pid(): number | undefined {
     return this.cp.pid;
+  }
+  get running(): boolean {
+    return this.cp.exitCode === null && this.cp.signalCode === null;
   }
   kill(sig: NodeJS.Signals = "SIGTERM"): void {
     try {

@@ -39,6 +39,19 @@ function spokeEnroll(res?: BackendInfo): EnrollConfig {
     res?.agentId && res.agentPub ? [{ deviceId: DeviceId.parse(res.agentId), publicKey: res.agentPub, roles: ["agent"] }] : [];
   return { deviceName: res?.agentName || "This device", roles: ["viewer"], companions };
 }
+
+/** A friendly label for a served-PWA device, shown to the approver during
+ *  enrollment (the phone/tablet has no local backend to name it). */
+function browserDeviceName(): string {
+  const ua = navigator.userAgent;
+  if (/iPhone/.test(ua)) return "iPhone";
+  if (/iPad/.test(ua)) return "iPad";
+  if (/iPod/.test(ua)) return "iPod touch";
+  if (/Android/.test(ua)) return "Android device";
+  if (/Macintosh/.test(ua)) return "Mac (browser)";
+  if (/Windows/.test(ua)) return "Windows (browser)";
+  return "Browser";
+}
 import "@xterm/xterm/css/xterm.css";
 import "./style.css";
 
@@ -112,7 +125,14 @@ async function main(): Promise<void> {
   // role flow below is untouched.
   if (!role && !isNative() && !loadHubConfig() && /^https?:$/.test(location.protocol)) {
     const hubUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`;
-    startApp(app, identity, { hubUrl });
+    // A freshly-installed PWA (e.g. on an iPhone) isn't trusted yet. Give it an
+    // enroll config so it self-enrolls as a viewer — shows a 6-digit code the
+    // owner approves on a trusted device — instead of reconnect-looping on 4007.
+    // No hub-key pin: the wss cert authenticates the hub, and the join is still
+    // gated by the owner reading + typing the code (number match). Once trusted,
+    // the enroll config is inert (only used when the hub refuses us).
+    const enroll: EnrollConfig = { deviceName: browserDeviceName(), roles: ["viewer"], companions: [] };
+    startApp(app, identity, { hubUrl }, undefined, enroll);
     return;
   }
 

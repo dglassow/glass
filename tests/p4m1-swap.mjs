@@ -1,5 +1,5 @@
 /**
- * Phase 4 · Milestone 1 — acceptance test for the blue/green worker swap.
+ * Phase 4 · Milestone 1 — acceptance test for supervision + blue/green swap.
  *
  * The supervisor runs sessiond + a worker; a viewer runs a shell through the
  * hub; then a swap is triggered on the control socket. Proves: health-BEFORE
@@ -7,7 +7,9 @@
  * (same pid, still a child of sessiond), the session continues with contiguous
  * scrollback across the swap and a non-reset seq, the worker generation
  * advanced, and a swap to a broken worker rolls back to blue with the session
- * intact.
+ * intact. It also proves unexpected worker/sessiond exits are recovered: a
+ * worker crash preserves the live shell, while a sessiond crash replaces both
+ * the daemon and its dependent worker and restores service.
  *
  * Run after `pnpm build`:  node tests/p4m1-swap.mjs
  */
@@ -60,12 +62,33 @@ function control(line, until, timeoutMs = 20000) {
   return new Promise((resolve) => {
     const s = net.connect(`${RUN}/supervisor.sock`);
     let buf = "";
-    const done = () => { try { s.end(); } catch {} resolve(buf); };
+    let finished = false;
+    let timer;
+    const done = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      try { s.end(); } catch {}
+      resolve(buf);
+    };
     s.on("connect", () => s.write(line + "\n"));
     s.on("data", (d) => { buf += d.toString(); if (until(buf)) done(); });
-    s.on("error", () => resolve(buf));
-    setTimeout(done, timeoutMs);
+    s.on("error", done);
+    timer = setTimeout(done, timeoutMs);
   });
+}
+
+async function waitStatus(predicate, label, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const raw = (await control("status", (b) => b.includes("\n"), 2000)).trim();
+    if (raw) {
+      const status = JSON.parse(raw);
+      if (predicate(status)) return status;
+    }
+    await sleep(50);
+  }
+  throw new Error(`timed out waiting for ${label}`);
 }
 
 class Peer {
@@ -122,7 +145,32 @@ async function run() {
   const sessiondPid = status0.sessiond.pid;
   const shellPid = childrenOf(sessiondPid)[0];
   check("shell is a child of the supervised sessiond", shellPid !== undefined && ppidOf(shellPid) === sessiondPid, `shell=${shellPid} sessiond=${sessiondPid}`);
-  const genBefore = status0.worker.generation;
+
+  // Unexpected worker death: the supervisor must replace only the worker. The
+  // PTY-owning sessiond and its shell stay untouched, and the replacement must
+  // complete its real hub-registration health check before recovery is "done".
+  const crashedWorkerPid = status0.worker.pid;
+  process.kill(crashedWorkerPid, "SIGKILL");
+  const recoveredWorker = await waitStatus(
+    (s) => s.worker.pid && s.worker.pid !== crashedWorkerPid && !s.recovery.active && s.recovery.workerRestarts >= 1,
+    "worker recovery",
+  );
+  check(
+    "unexpected worker exit is restarted without replacing sessiond",
+    recoveredWorker.sessiond.pid === sessiondPid && recoveredWorker.worker.pid !== crashedWorkerPid,
+    `worker ${crashedWorkerPid} -> ${recoveredWorker.worker.pid}`,
+  );
+  check("worker recovery preserves the live shell", alive(shellPid) && ppidOf(shellPid) === sessiondPid);
+
+  const crashAttachId = v.send({ type: "session.attach", sessionId: sid }, "agent-pro");
+  const crashAttach = await v.waitFor((e) => e.body?.type === "session.attached" && e.replyTo === crashAttachId, 8000);
+  const crashScrollback = ticks(crashAttach.body.scrollback);
+  const crashMarker = `AFTERCRASH_${randomUUID().slice(0, 6)}`;
+  v.send({ type: "session.input", sessionId: sid, data: `echo ${crashMarker}\r` }, "agent-pro");
+  const crashIo = await v.waitFor((e) => e.body?.type === "session.output" && e.body.sessionId === sid && e.body.data.includes(crashMarker), 8000).then(() => true).catch(() => false);
+  check("restarted worker reattaches with scrollback and live I/O", crashScrollback.length >= before.length && crashIo);
+
+  const genBefore = recoveredWorker.worker.generation;
 
   // Trigger the blue/green swap (same entry — simulating an update).
   const progress = (await control(`swap ${AGENT}`, (b) => b.split("\n").some((l) => l === "ok" || l.startsWith("failed")))).trim().split("\n");
@@ -160,6 +208,35 @@ async function run() {
   v.send({ type: "session.input", sessionId: sid, data: `echo ${marker2}\r` }, "agent-pro");
   const back = await v.waitFor((e) => e.body?.type === "session.output" && e.body.sessionId === sid && e.body.data.includes(marker2), 8000).then(() => true).catch(() => false);
   check("session still works after rollback", back && alive(shellPid));
+
+  // Unexpected sessiond death cannot preserve its PTYs, but the supervisor must
+  // replace the daemon and the worker whose downstream connection died, then
+  // return the device to service without an external restart.
+  const beforeSessiondCrash = JSON.parse((await control("status", (b) => b.includes("\n"))).trim());
+  process.kill(beforeSessiondCrash.sessiond.pid, "SIGKILL");
+  const recoveredStack = await waitStatus(
+    (s) =>
+      s.sessiond.pid &&
+      s.sessiond.pid !== beforeSessiondCrash.sessiond.pid &&
+      s.worker.pid &&
+      s.worker.pid !== beforeSessiondCrash.worker.pid &&
+      !s.recovery.active &&
+      s.recovery.sessiondRestarts >= 1,
+    "sessiond + worker recovery",
+  );
+  check(
+    "unexpected sessiond exit restarts the daemon and dependent worker",
+    recoveredStack.sessiond.pid !== beforeSessiondCrash.sessiond.pid && recoveredStack.worker.pid !== beforeSessiondCrash.worker.pid,
+    `sessiond ${beforeSessiondCrash.sessiond.pid} -> ${recoveredStack.sessiond.pid}, worker ${beforeSessiondCrash.worker.pid} -> ${recoveredStack.worker.pid}`,
+  );
+
+  const createAfterRecovery = v.send({ type: "session.create", kind: "pty", deviceId: "agent-pro", cols: 80, rows: 24 }, "agent-pro");
+  const createdAfterRecovery = await v.waitFor((e) => e.body?.type === "session.created" && e.replyTo === createAfterRecovery, 8000);
+  const recoveredSid = createdAfterRecovery.body.session.id;
+  const stackMarker = `AFTERSD_${randomUUID().slice(0, 6)}`;
+  v.send({ type: "session.input", sessionId: recoveredSid, data: `echo ${stackMarker}\r` }, "agent-pro");
+  const stackIo = await v.waitFor((e) => e.body?.type === "session.output" && e.body.sessionId === recoveredSid && e.body.data.includes(stackMarker), 8000).then(() => true).catch(() => false);
+  check("recovered sessiond stack serves new sessions", stackIo);
 
   v.close();
 }

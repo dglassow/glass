@@ -61,7 +61,7 @@ async function waitUntil(fn, label, capMs = 8000) {
   throw new Error(`timed out waiting for ${label}`);
 }
 
-let sessiond, hub, approver, join1, join2;
+let sessiond, hub, approver, join1, join2, join3;
 async function run() {
   rmSync(RUN, { recursive: true, force: true });
   mkdirSync(RUN, { recursive: true, mode: 0o700 });
@@ -72,6 +72,7 @@ async function run() {
   trustAdd("viewer-studio", appr.publicKey, "viewer");
   const j1 = await makeIdentity("viewer-join1");
   const j2 = await makeIdentity("viewer-join2");
+  const j3 = await makeIdentity("viewer-join3"); // the PWA (e.g. iPhone) — no pin
   const companion = await makeIdentity("spoke-abc12345"); // the joining Mac's shell agent
 
   sessiond = startProc("sessiond", [SESSIOND, "--socket", SD], /listening on/);
@@ -132,6 +133,25 @@ async function run() {
   check("hub CLAMPED the viewer's self-assigned roles to [viewer]", eq(trusted()["viewer-join2"]?.roles, ["viewer"]));
   check("companion trusted with role [agent] only (no self-granted hub)", eq(trusted()["spoke-abc12345"]?.roles, ["agent"]));
   check("approver stayed connected throughout", apprConn === 1);
+
+  // --- Joiner 3: the PWA case (e.g. a fresh iPhone) — NO hub-key pin. It relies on
+  //     wss TLS for hub identity (TOFU), so it must still ENTER enrollment (code
+  //     shown without a client-side hub-proof check) and remain gated by the owner
+  //     typing that code. This is exactly the served-origin path in main.ts. ---
+  requests.length = 0;
+  let j3Waiting = null, j3Conn = 0;
+  const enrollPwa = { deviceName: "iPhone", roles: ["viewer"], companions: [] };
+  join3 = new HubClient(url, "viewer-join3", "iPhone", {
+    onConnected: () => j3Conn++,
+    onEnrollWaiting: (code) => (j3Waiting = code),
+  }, j3.signer, undefined, enrollPwa); // <-- undefined pin: the PWA has no pinned hub key
+  join3.connect();
+  await waitUntil(() => j3Waiting !== null, "PWA joiner (no pin) enters enrollment");
+  check("no-pin (PWA) device still enrolls: HUB-minted code shown over TOFU/wss", /^\d{6}$/.test(j3Waiting), j3Waiting);
+  const req3 = await waitUntil(() => requests.find((r) => r.deviceName === "iPhone"), "approver notified (PWA)");
+  approver.sendEnrollDecision(req3.requestId, true, j3Waiting); // owner reads the code off the phone
+  await waitUntil(() => j3Conn > 0, "PWA joiner connects as trusted after approval");
+  check("no-pin (PWA) join gated by the owner typing the code → trusted viewer", j3Conn === 1 && eq(trusted()["viewer-join3"]?.roles, ["viewer"]));
 }
 
 async function cleanup() {

@@ -1,6 +1,6 @@
 /**
  * Supervisor control socket — a protocol-free, newline-text Unix socket.
- *   status            -> one JSON line of process state
+ *   status            -> one JSON line of process + recovery state/counters
  *   swap <entry.js>   -> progress lines (standby, spawned, ready, retired, ok)
  *                        or (standby, spawned, failed <reason>) on rollback
  */
@@ -40,10 +40,14 @@ async function handle(line: string, socket: net.Socket, sup: Supervisor): Promis
   }
   if (line.startsWith("swap ")) {
     const entry = line.slice(5).trim();
+    let reportedFailure = false;
     try {
-      await sup.swap(entry, (p) => socket.write(p + "\n"));
-    } catch {
-      /* swap() already emitted a `failed <reason>` progress line */
+      await sup.swap(entry, (p) => {
+        if (p.startsWith("failed")) reportedFailure = true;
+        socket.write(p + "\n");
+      });
+    } catch (err) {
+      if (!reportedFailure) socket.write(`failed ${err instanceof Error ? err.message : String(err)}\n`);
     }
     return;
   }

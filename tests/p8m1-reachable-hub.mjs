@@ -106,7 +106,7 @@ function httpsGet(port, path) {
     const req = https.get({ host: "127.0.0.1", port, path, rejectUnauthorized: false }, (res) => {
       let body = "";
       res.on("data", (d) => (body += d));
-      res.on("end", () => resolve({ status: res.statusCode, body }));
+      res.on("end", () => resolve({ status: res.statusCode, body, headers: res.headers }));
     });
     req.on("error", (e) => resolve({ status: 0, body: String(e) }));
     req.setTimeout(4000, () => { req.destroy(); resolve({ status: 0, body: "timeout" }); });
@@ -124,6 +124,10 @@ async function run() {
   mkdirSync(RUN, { recursive: true, mode: 0o700 });
   mkdirSync(WEBROOT, { recursive: true });
   writeFileSync(`${WEBROOT}/index.html`, "<!doctype html><title>Glass PWA</title>P8M1_PWA_OK");
+  // iOS PWA needs the right content-types: a manifest served as application/manifest+json
+  // and a service worker as text/javascript, or Safari ignores the install / SW register.
+  writeFileSync(`${WEBROOT}/manifest.webmanifest`, JSON.stringify({ name: "Glass", display: "standalone" }));
+  writeFileSync(`${WEBROOT}/sw.js`, "self.addEventListener('fetch',()=>{});");
   mkdirSync(UPDATES, { recursive: true });
   writeFileSync(`${UPDATES}/latest.json`, JSON.stringify({ version: "9.9.9", platforms: {} }));
   console.log("\n\x1b[1mGlass — P8 M1 reachable hub (dual listener: loopback ws + relay TLS)\x1b[0m\n");
@@ -202,6 +206,11 @@ async function run() {
   // PWA served over the TLS listener.
   const page = await httpsGet(wssPort, "/");
   check("PWA/static served over the TLS listener", page.status === 200 && page.body.includes("P8M1_PWA_OK"), `status=${page.status}`);
+  // Content-types iOS depends on for install + SW registration.
+  const wm = await httpsGet(wssPort, "/manifest.webmanifest");
+  check("manifest served as application/manifest+json (iOS install)", wm.status === 200 && /application\/manifest\+json/.test(wm.headers["content-type"] ?? ""), wm.headers?.["content-type"]);
+  const sw = await httpsGet(wssPort, "/sw.js");
+  check("service worker served as javascript (SW registration)", sw.status === 200 && /javascript/.test(sw.headers["content-type"] ?? ""), sw.headers?.["content-type"]);
 
   // Auto-update endpoint served over the TLS listener; traversal refused.
   const manifest = await httpsGet(wssPort, "/updates/latest.json");

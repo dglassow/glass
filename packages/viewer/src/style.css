@@ -839,6 +839,18 @@ button.tset-done:hover { background: #1d2536; }
 .skill-icon-input { width: 64px; }
 .skill-enter { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 6px; }
 
+/* Extensions manager (extensions-ui.ts, inside .tset-panel) — the import
+   textarea; rows/foot reuse the .ribbon-config chrome. */
+.ribbon-config textarea {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: 12px/1.5 var(--mono);
+  resize: vertical;
+}
+
 /* ---- mobile / PWA (<720px): sidebar becomes a slide-out drawer ---------- */
 
 /* Desktop: the drawer chrome doesn't exist. Both are position:fixed when

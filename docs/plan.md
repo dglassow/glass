@@ -123,6 +123,8 @@ Session list (sidebar) + tiling pane area. Type badges, device labels, live stat
 
 Right-click a session or device row to rename it inline. Session titles live in sessiond's record (`session.rename`, broadcast fleet-wide); device names persist in the hub's trust store (`device.rename`), which registration prefers over a device's self-reported hello name — so both survive reconnects and restarts.
 
+**Extensions** (see `docs/extensions.md`): user-authored add-ons imported as a single JSON file, VS Code-style. Install is consent — the dialog shows the declared capabilities, unknown ones refuse to import. Code runs in a dedicated Web Worker (no DOM, no page storage, no Tauri IPC); its only bridge to Glass is a capability-gated RPC (`sessions.read`, `sessions.write`, `storage`, `notify` to start — grown as needs appear). Ribbon buttons are the capability-free UI surface. Per-device (localStorage), like skills; not in the backup bundle.
+
 ---
 
 ## 7. Browser

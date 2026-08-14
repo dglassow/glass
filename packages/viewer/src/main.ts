@@ -33,6 +33,8 @@ import { cmpVersions } from "./update-policy.js";
 import { createRibbon } from "./ribbon.js";
 import { skillInput, type Skill } from "./skills.js";
 import { loadSkills, openSkillsEditor } from "./skills-ui.js";
+import { ExtensionHost } from "./extension-host.js";
+import { loadExtensions, openExtensionsManager } from "./extensions-ui.js";
 import { DeviceId, type DeviceRecord, type DeviceRole, type EnrollCompanion } from "@glass/protocol";
 
 /** Build the enrollment config for a spoke: enroll the viewer, with the local
@@ -614,7 +616,10 @@ function startApp(
       },
       onDeviceState: () => void refreshDevices(),
       onScrollback: (sid, sb) => workspace.reset(sid, sb),
-      onOutput: (sid, data) => workspace.write(sid, data),
+      onOutput: (sid, data) => {
+        workspace.write(sid, data);
+        extHost.emitOutput(sid, data); // extensions holding sessions.read + watching
+      },
       onExited: (sid) => {
         remote.delete(sid);
         workspace.markDead(sid, "session exited");
@@ -691,21 +696,59 @@ function startApp(
     });
   };
   const ribbon = createRibbon({
-    manageLabel: "Skills…",
-    onManage: () =>
-      openSkillsEditor((skill, id) => {
-        if (!skill) {
-          knownSkills.delete(id);
-          ribbon.unregister(id);
-          return;
-        }
-        const isNew = !knownSkills.has(id);
-        registerSkill(skill);
-        if (isNew) ribbon.pin(id); // a freshly created skill lands on the bar
-      }),
+    manage: [
+      {
+        label: "Skills…",
+        open: () =>
+          openSkillsEditor((skill, id) => {
+            if (!skill) {
+              knownSkills.delete(id);
+              ribbon.unregister(id);
+              return;
+            }
+            const isNew = !knownSkills.has(id);
+            registerSkill(skill);
+            if (isNew) ribbon.pin(id); // a freshly created skill lands on the bar
+          }),
+      },
+      {
+        label: "Extensions…",
+        open: () =>
+          openExtensionsManager((exts) => {
+            for (const e of exts) if (!extIds.has(e.id)) freshExtIds.add(e.id);
+            extIds = new Set(exts.map((e) => e.id));
+            extHost.sync(exts);
+          }),
+      },
+    ],
   });
   for (const s of loadSkills()) registerSkill(s);
   app.classList.add("has-ribbon");
+
+  // Extensions: each enabled one runs in its own sandboxed Worker; everything
+  // it can reach in Glass goes through this delegate, gated by the
+  // capabilities granted at install (extension-host.ts). Buttons auto-pin
+  // only for extensions installed THIS session — a re-registration on a
+  // normal launch must never override the user's unpin.
+  let extIds = new Set(loadExtensions().map((e) => e.id));
+  const freshExtIds = new Set<string>();
+  const extHost = new ExtensionHost({
+    sessionList: () => workspace.sessionList(),
+    typeInFocused: (text) => {
+      const target = workspace.sessionList().find((s) => s.focused && s.visible);
+      if (target) client.input(target.agentId, target.sessionId, text);
+    },
+    notify: (message) => {
+      statusText.textContent = message;
+    },
+    registerButton: (id, title, icon, activate) => {
+      ribbon.register({ id, title, icon, activate });
+      const extId = id.split(":")[1]; // widgetId format: ext:<extId>:<buttonId>
+      if (extId && freshExtIds.has(extId)) ribbon.pin(id);
+    },
+    unregisterButton: (id) => ribbon.unregister(id),
+  });
+  extHost.sync(loadExtensions());
 
   app.append(sidebar, workspace.el, ribbon.el, menuBtn, backdrop, updateBanner);
 

@@ -41,9 +41,8 @@ export interface Ribbon {
 }
 
 export interface RibbonOptions {
-  /** Optional extra action in the customize dialog (e.g. "Skills…"). */
-  manageLabel?: string;
-  onManage?: () => void;
+  /** Optional extra actions in the customize dialog (e.g. "Skills…"). */
+  manage?: Array<{ label: string; open: () => void }>;
 }
 
 const KEY = "glass.ribbon";
@@ -134,7 +133,7 @@ export function createRibbon(opts: RibbonOptions = {}): Ribbon {
       if (widgets.size === 0) {
         const empty = document.createElement("div");
         empty.className = "ribbon-config-empty";
-        empty.textContent = opts.onManage
+        empty.textContent = opts.manage?.length
           ? "Nothing to pin yet — anything you pin here shows on the right-side ribbon."
           : "No widgets available yet — future releases will add some. Anything you pin here shows on the right-side ribbon.";
         list.append(empty);
@@ -190,13 +189,13 @@ export function createRibbon(opts: RibbonOptions = {}): Ribbon {
 
     const foot = document.createElement("div");
     foot.className = "ribbon-config-foot";
-    if (opts.onManage && opts.manageLabel) {
+    for (const m of opts.manage ?? []) {
       const manageBtn = document.createElement("button");
       manageBtn.className = "update-banner-btn";
-      manageBtn.textContent = opts.manageLabel;
+      manageBtn.textContent = m.label;
       manageBtn.addEventListener("click", () => {
         close();
-        opts.onManage!();
+        m.open();
       });
       foot.append(manageBtn);
     }

@@ -3,52 +3,85 @@
 A unified client for running terminal sessions across your own machines, with a
 chat surface for mobile.
 
-One app, three roles. Any Mac can be a **Hub** (registry, auth, vault, relay),
-every Mac is an **Agent** (hosts sessions), and every device is a **Viewer** —
-a native app on macOS, a chat-only PWA everywhere else.
+One app, three roles. Any Mac can be a **Hub** (registry, auth, vault, relay,
+update distribution, git hosting), every Mac is an **Agent** (hosts sessions),
+and every device is a **Viewer** — a native app on macOS, a chat-only PWA
+everywhere else.
 
 Glass replaces Prism and supersedes Forge. Etch is a separate CLI that Glass
 detects but does not manage.
 
 ## Status
 
-Phase 0 complete; Phase 1 milestones 1–3 done. `sessiond` owns PTYs over a Unix
-socket, `agent` relays them, `hub` is a WebSocket registry+relay, and `viewer`
-is the shared web frontend (xterm.js panes over the hub). The load-bearing
-property is proven end-to-end — locally (`tests/m1-acceptance.mjs`), through the
-hub (`tests/m2-acceptance.mjs`), and in the real viewer client
-(`tests/m3-viewer.mjs`): kill and restart the worker and the shell survives with
-scrollback intact, even output produced while no worker existed; the viewer
-re-attaches on its own. Phase 2 milestone 1 adds real **device-key auth**: peers
-prove key possession with an Ed25519 challenge/response and the hub admits only
-enrolled devices, with number-matching enrollment (`tests/p2m1-auth.mjs`) and a
-WebAuthn **passkey** bootstrap for the first device (`tests/p2m2-passkey.mjs`).
-Phase 3 milestone 1 adds an encrypted **vault**: envelope encryption over
-`node:sqlite`, per-device secret scoping, `glass run` secret injection, and an
-encrypted **backup bundle** that survives the wipe-and-restore recovery drill.
-Phase 4 milestone 1 makes the `supervisor` real: a **blue/green worker swap**
-that health-checks the new worker before retiring the old, with shells running
-untouched throughout (`tests/p4m1-swap.mjs`). Phase 5 milestone 1 adds a **chat
-provider**: a `chat` session kind that runs `etch -z` per message and rides the
-same session protocol as a terminal (`tests/p5m1-chat.mjs`). Off-tailnet reach is
-a reverse-tunnel relay with **hub-key mutual auth + TLS channel binding** — a
-TLS-terminating MITM is refused even with the right pin (`tests/p2m3-relay.mjs`,
-`infra/lightsail/` for the VPS). 122 checks across ten suites, all in CI. The xterm GUI bundles; the Tauri desktop
-shell (`packages/desktop`) is scaffolded for a Mac build. `supervisor` is the
-only remaining skeleton.
+Glass is deployed and running against real infrastructure. The load-bearing
+design decision — sessions live in a daemon that survives updates, so shells
+are never interrupted — is proven end-to-end, over the public internet, in a
+signed desktop app.
+
+What exists today:
+
+- **Terminal sessions that survive everything.** `sessiond` owns the PTYs;
+  the worker process above it is swapped blue/green (health-checked before the
+  old one retires, instant rollback on failure) and crashes are recovered,
+  all with shells running untouched and scrollback intact.
+- **Real identity.** Ed25519 device keys with challenge/response admission,
+  number-matching enrollment (self-serve from the app), and a WebAuthn passkey
+  bootstrap for the very first device. The hub is fail-closed.
+- **Reach from anywhere.** A dumb VPS relay running only stock `sshd`: the hub
+  dials out and holds a reverse tunnel, TLS terminates *in the hub*, and spokes
+  pin the hub's identity key with TLS-exporter channel binding — a
+  TLS-terminating man-in-the-middle is refused even with a valid certificate.
+  Terraform for the relay lives in `infra/lightsail/`.
+- **An encrypted vault and backup.** Envelope encryption over SQLite,
+  passphrase + offline recovery key (LUKS-style keyslots), per-device secret
+  scoping, `glass run` env-only injection, and a single encrypted backup bundle
+  that passes the wipe-and-restore drill.
+- **Signed self-update, twice over.** Backend services update from SSH-signed
+  git tags verified against a key pinned outside the repo (adversarially
+  tested: config-injection RCE, TOCTOU tag swaps, symlink escapes and friends
+  are all regression-covered). The desktop app updates via the Tauri updater
+  served from the hub — minisign-signed, notarized, with a device-side
+  anti-rollback floor.
+- **A fleet, not a demo.** The hub listens on loopback for its local viewer and
+  over the relay for spokes; every viewer sees every agent's sessions live.
+  The hub pushes update-available banners to out-of-date spokes.
+- **Chat sessions.** A `chat` session kind runs Etch non-interactively per
+  message and rides the identical session protocol as a terminal.
+- **Cross-device browsing.** A SOCKS5 exit on one device, an isolated browser
+  profile on another: render locally, egress from the machine you choose. No
+  pixel streaming.
+- **Git hosting.** The hub serves bare repos to spokes over authenticated
+  smart-HTTP on its existing TLS listener, with per-device tokens and ACLs;
+  repos ride the backup bundle.
+- **A real macOS app and a PWA.** `packages/desktop` builds a signed,
+  notarized, self-contained Glass.dmg (bundled backend + portable node — no
+  runtime dependencies) with a first-run role picker (Standalone / Hub /
+  Spoke), a tiling session workspace, and customizable terminal appearance.
+  The same viewer code, served by the hub over TLS, is an installable
+  mobile PWA.
+
+Verified by 19 adversarial test harnesses (`pnpm test`, all in CI), plus
+red-team passes on the security-critical paths. Still ahead: the voice/chat
+mobile surface (Phase 5 remainder), the sessiond-to-sessiond fd handoff, and
+the full production-gate failure drill (`docs/plan.md` §16).
 
 ## Layout
 
 ```
 packages/
-  protocol/     the wire contract — everything depends on this, and on nothing else shared
-  supervisor/   lifecycle tier, rarely updated                     (P4: blue/green swap)
-  sessiond/     owns PTYs, survives updates                        (M1: PTY over socket)
-  hub/          registry, auth, vault, relay, update distribution  (M2: WS registry + relay)
-  agent/        worker: session routing and providers              (M1 relay + M2 hub bridge)
-  viewer/       shared web frontend — webview on desktop, PWA on mobile (M3: xterm panes over the hub)
-  desktop/      Tauri shell                                        (M3 scaffold — build on a Mac)
-  cli/          secret injection, enrollment                       (P3: glass run)
+  protocol/        the wire contract — everything depends on this, and on nothing else shared
+  supervisor/      lifecycle tier: spawns/monitors sessiond + worker, blue/green swap, crash recovery
+  sessiond/        owns PTYs and chat sessions; survives updates — the load-bearing tier
+  hub/             registry, auth, vault, backup, relay tunnel, updater, update serving, git hosting, PWA serving
+  agent/           worker: session routing, hub link, SOCKS proxy endpoint
+  viewer/          shared web frontend — webview on desktop, installable PWA on mobile
+  desktop/         Tauri v2 macOS shell (workspace-excluded; needs Rust on a Mac)
+  backend-bundle/  meta-package that flattens hub/sessiond/agent into the .app's bundled backend
+  cli/             glass run — secret injection with structural redaction
+deploy/            per-role backend launcher + live-relay bring-up scripts
+infra/lightsail/   Terraform for the relay VPS (stock sshd, zero Glass code)
+tests/             19 acceptance/adversarial harnesses — the source of truth for what works
+docs/              plan.md (architecture, authoritative) + open-questions.md
 ```
 
 ## Protocol
@@ -67,10 +100,13 @@ Message families:
 
 | Family | Covers |
 |---|---|
-| `handshake` | `hello` / `hello.ack`, version negotiation, Etch detection |
-| `device` | enrollment with verification codes, revocation, registry state |
-| `session` | create, list, attach, input, output, resize, close, exit |
-| `system` | heartbeat, structured errors |
+| `handshake` | `hello` / challenge / proof / ack — Ed25519 mutual auth, version negotiation, channel binding, Etch detection |
+| `device` | number-matching enrollment, revocation, registry state |
+| `session` | create, list, attach, input, output, resize, close, exit — plus fleet-wide created/exited broadcasts |
+| `credential` | WebAuthn passkey registration and login |
+| `vault` | authenticated machine retrieval of scoped secrets |
+| `proxy` | per-connection SOCKS tunneling between devices |
+| `system` | heartbeat, structured errors, update-available push |
 
 ### Versioning
 
@@ -90,14 +126,21 @@ proxied, never streamed, so they are not sessions.
 pnpm install
 pnpm typecheck
 pnpm build
+pnpm test        # all 19 harnesses; they spawn real processes and real git/tls
 ```
+
+The desktop shell builds separately on a Mac (Rust required) — see
+`packages/desktop/README.md`. Deployment against a real relay is documented in
+`deploy/README.md`; provisioning the relay itself in `infra/lightsail/README.md`.
 
 ## Security
 
-This repository is public and contains **no instance configuration**. Relay
-hostnames, tunnel keys, TLS certificates, device names, and secrets live only in
-the encrypted backup bundle.
+This repository is public and contains **no instance configuration**. Tunnel
+keys, TLS certificates, device names, and secrets live only in gitignored
+instance config and the encrypted backup bundle. (The one class of exception:
+public relay/updater endpoints, which carry only ciphertext.)
 
-Release tags are signed and verified by the updater before anything is applied.
-The updater runs code unattended on machines with full shell access, so an
-unsigned tag is not installed.
+Release tags are signed and verified by the updater before anything is applied
+— against a key pinned outside the repo, treating the fetched repo itself as
+attacker input. The updater runs code unattended on machines with full shell
+access, so it is the most adversarially tested code in the project.

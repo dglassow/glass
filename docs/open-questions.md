@@ -14,7 +14,7 @@ Types: **Decide** = needs your call · **Find out** = needs a spike first · **D
 
 | ID | Type | Question | My lean |
 |---|---|---|---|
-| **Q1** | Do | App Store Connect API key for notarization | in progress |
+| ~~Q1~~ | ~~Do~~ | ~~App Store Connect API key for notarization~~ | **resolved ✓** |
 | ~~Q2~~ | ~~Find out~~ | ~~Does `@simplewebauthn/server` fit the passkey flow?~~ | **resolved ✓** |
 | **Q3** | Find out | Does Etch have a programmatic mode with structured output? | deferred |
 | **Q4** | Find out | whisper.cpp or faster-whisper, on which Mac? | spike |
@@ -26,9 +26,11 @@ Types: **Decide** = needs your call · **Find out** = needs a spike first · **D
 ## Phase 2 — Identity and remote access
 
 ### Q1 — Apple Developer Program setup
-**Do.** $99/year. Without it Gatekeeper blocks the app on every Mac except the one that built it.
-
-You mentioned you may already have this and want a step-by-step walkthrough — say the word and I'll write it out. Enrollment has approval lead time, so worth starting before Phase 2 rather than during.
+**Resolved ✓.** Program active, Developer ID Application cert issued (plan §15),
+and notarization is operational: `packages/desktop/sign-and-notarize.sh`
+signs + notarizes + staples the app and dmg via the `glass-notary` notarytool
+Keychain profile. Signed, notarized Glass.dmg artifacts ship via the hub's
+updater endpoint (Phase 8).
 
 ---
 

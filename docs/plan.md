@@ -129,7 +129,7 @@ Session list (sidebar) + tiling pane area. Type badges, device labels, live stat
 
 Optional: **traffic proxying**. A device runs a SOCKS5 endpoint over the existing tunnel; the app launches a browser profile with `--proxy-server` pointed at it. You render and interact locally, but egress happens from the chosen device. Proxied profiles stay fully separate from normal browsing — distinct profile, distinct cookie jar, distinct window.
 
-Post-MVP, but the proxy endpoint should be reserved in the protocol now.
+Built in Phase 6: the SOCKS5 exit + `proxy.*` tunneling live in `agent/src/proxy/`, and the desktop shell launches the isolated proxied profile.
 
 ---
 
@@ -217,7 +217,7 @@ Voice is held to a stricter standard than typed input on purpose — speech reco
 The Hub optionally hosts git repositories centrally for all spokes. Two separable pieces:
 
 1. **Update source (Phase 4):** the Hub tracks GitHub for its own updates. Minimal.
-2. **Spoke project hosting (later):** bare repos served to spokes over SSH for your other projects.
+2. **Spoke project hosting (Phase 7):** bare repos served to spokes for your other projects — over **authenticated smart-HTTP on the Hub's existing TLS listener** (`/git/`, per-device tokens + per-repo ACLs), not SSH. Reusing the relay tunnel means no second exposed service and no sshd on the Hub.
 
 Both are included in the backup bundle.
 
@@ -257,6 +257,13 @@ SOCKS endpoint, managed profiles, per-profile isolation.
 
 ### Phase 7 — Git hosting for spokes
 Bare repo serving, per-spoke access, backup integration.
+→ **Done when:** a spoke clones and pushes a hosted repo with a stock git client, and the repo survives the backup drill.
+
+### Phase 8 — Fleet reachability & distribution
+Multi-listener Hub (loopback for the local viewer, TLS over the relay for spokes), fleet-wide session sync, self-serve number-match enrollment from the app, and desktop-app auto-update served by the Hub (minisign-signed, notarized, anti-rollback) with Hub→spoke skew banners.
+→ **Done when:** a fresh Mac joins the fleet from the app alone, sees every device's sessions, and receives signed updates without anyone touching it.
+
+**Build status lives in `CLAUDE.md` (“Current state”), which is updated as milestones land. As of Aug 2026: Phases 0–4, 6–8 complete; Phase 5 has the chat provider but not voice or the PWA chat surface.**
 
 ---
 
@@ -278,6 +285,8 @@ macOS refuses to run unsigned apps from other machines, so this is mandatory rat
 Certificate type matters and the names are confusingly similar. **Developer ID Application** is for distribution outside the App Store — not "Apple Distribution" (App Store) and not "Apple Development" (local only). The G1 intermediate expires Feb 2027 regardless of issue date, so G2 is the only sensible choice.
 
 ### Notarization credentials
+
+**Operational.** `packages/desktop/sign-and-notarize.sh` deep-signs the app inside-out (native addons → bundled node with JIT entitlements → app), notarizes app + dmg via the `glass-notary` notarytool Keychain profile, and staples both — no secrets appear in any command.
 
 App Store Connect API key rather than Apple ID + app-specific password — independently revocable, scoped narrowly, and works in CI without embedding personal credentials.
 

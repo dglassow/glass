@@ -345,7 +345,7 @@ fn backend_status(state: tauri::State<'_, Backend>) -> serde_json::Value {
 }
 
 // ---------------------------------------------------------------------------
-// Proxied browser launch (unchanged)
+// Proxied browser launch
 // ---------------------------------------------------------------------------
 
 /// Default macOS binary per browser kind. Mirrors DEFAULT_BIN in
@@ -375,7 +375,8 @@ fn launch_proxied_browser(
     browser: Option<String>,
     socks_host: String,
     socks_port: u16,
-    profile_dir: String,
+    profile_dir: Option<String>,
+    profile_name: Option<String>,
     url: Option<String>,
 ) -> Result<(), String> {
     // u16 already bounds the port at 65535; only zero is invalid.
@@ -385,9 +386,32 @@ fn launch_proxied_browser(
     if socks_host.trim().is_empty() {
         return Err("socksHost is required".into());
     }
-    if profile_dir.trim().is_empty() {
-        return Err("profileDir is required for profile isolation".into());
-    }
+    // Either an explicit absolute dir, or a NAME the shell resolves under
+    // ~/.glass/desktop/browser-profiles/ — the webview has no $HOME. The name
+    // is sanitized to a conservative charset so a device id can never traverse
+    // out of the profiles root.
+    let profile_dir = match (profile_dir, profile_name) {
+        (Some(dir), _) if !dir.trim().is_empty() => dir,
+        (_, Some(name)) => {
+            let safe: String = name
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+                .collect();
+            let safe = safe.trim_matches('.').to_string(); // no "." / ".." segments
+            if safe.is_empty() {
+                return Err("profileName has no usable characters".into());
+            }
+            let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
+            let dir = std::path::Path::new(&home)
+                .join(".glass")
+                .join("desktop")
+                .join("browser-profiles")
+                .join(safe);
+            std::fs::create_dir_all(&dir).map_err(|e| format!("could not create profile dir: {e}"))?;
+            dir.to_string_lossy().into_owned()
+        }
+        _ => return Err("profileDir or profileName is required for profile isolation".into()),
+    };
 
     let kind = browser.as_deref().unwrap_or("chrome");
     let binary = default_binary(kind).ok_or_else(|| {

@@ -39,6 +39,7 @@ import {
   type DeviceRole,
   type Signer,
 } from "@glass/protocol";
+import { ProxyExit, ProxyForwarder } from "./proxy/index.js";
 
 const APP_VERSION = "0.0.0";
 const RECONNECT_MIN_MS = 250;
@@ -98,6 +99,51 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
   // --- translation tables (soft state) ---
   const pending = new Map<string, string>(); // request id -> viewer address
   const attached = new Map<string, Set<string>>(); // sessionId -> viewers
+
+  // --- browser proxy (plan §7) ---
+  // Exits are per REQUESTING peer, so replies are bound to the device that
+  // opened the channel and one peer's frames can never touch another's
+  // channels. Forwarders are per EXIT device (reused across clicks); their
+  // SOCKS listeners bind loopback only. All of it is soft state in the worker:
+  // a blue/green swap drops live proxied connections (unlike sessions) — the
+  // browser just reconnects through a fresh forwarder.
+  const exits = new Map<string, ProxyExit>(); // requesting peer -> exit
+  const forwarders = new Map<string, { fwd: ProxyForwarder; port: Promise<number> }>(); // exit device -> forwarder
+
+  function exitFor(peer: string): ProxyExit {
+    let e = exits.get(peer);
+    if (!e) {
+      e = new ProxyExit((msg) => toHub(peer, msg), {
+        // Egress audit trail: every destination dialled on this device's behalf.
+        onOpen: (host, port) => console.error(`agent: proxy egress for ${peer} -> ${host}:${port}`),
+      });
+      exits.set(peer, e);
+    }
+    return e;
+  }
+
+  function forwarderFor(exitDeviceId: string): { fwd: ProxyForwarder; port: Promise<number> } {
+    let f = forwarders.get(exitDeviceId);
+    if (!f) {
+      const fwd = new ProxyForwarder((msg) => toHub(exitDeviceId, msg));
+      f = { fwd, port: fwd.listen() };
+      forwarders.set(exitDeviceId, f);
+    }
+    return f;
+  }
+
+  function closeProxyPeer(deviceId: string): void {
+    const ex = exits.get(deviceId);
+    if (ex) {
+      exits.delete(deviceId);
+      ex.closeAll();
+    }
+    const f = forwarders.get(deviceId);
+    if (f) {
+      forwarders.delete(deviceId);
+      f.fwd.close();
+    }
+  }
 
   let hub: WebSocket | null = null;
   let closed = false;
@@ -219,9 +265,49 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
       case "session.close":
         toSessiond(env.id, body);
         break;
+      case "proxy.forward.open": {
+        // Viewer asks US (its local agent) to run a SOCKS forwarder that
+        // egresses through body.exitDeviceId. Idempotent: same exit -> same
+        // listener; the reply carries the loopback port to point a browser at.
+        const f = forwarderFor(body.exitDeviceId);
+        void f.port.then((port) => toHub(viewer, { type: "proxy.forward.opened", exitDeviceId: body.exitDeviceId, port }, env.id));
+        break;
+      }
+      case "proxy.forward.close": {
+        // Close ONLY the forwarder aimed at this exit — not any exit channels
+        // where that same device is the requesting peer (it may be browsing
+        // through us at the same time).
+        const f = forwarders.get(body.exitDeviceId);
+        if (f) {
+          forwarders.delete(body.exitDeviceId);
+          f.fwd.close();
+        }
+        break;
+      }
+      case "proxy.open":
+        // A peer wants to egress through THIS device.
+        exitFor(viewer).handle(body);
+        break;
+      case "proxy.opened":
+        // Only an exit device answers opens; dispatch to the forwarder aimed at it.
+        forwarders.get(viewer)?.fwd.handle(body);
+        break;
+      case "proxy.data":
+      case "proxy.close":
+        // Direction is ambiguous (exit channel this peer opened, or forwarder
+        // channel egressing through it). Channel ids are UUIDs and both halves
+        // ignore ids they don't own, so deliver to both of this peer's halves.
+        exits.get(viewer)?.handle(body);
+        forwarders.get(viewer)?.fwd.handle(body);
+        break;
       case "device.state": {
-        // A viewer went away: prune it so we don't fan out to a dead address.
-        if (body.device.state !== "connected") pruneViewer(body.device.id);
+        // A viewer went away: prune it so we don't fan out to a dead address,
+        // and drop any proxy state bound to it (its exit channels, or the
+        // forwarder whose egress device just vanished).
+        if (body.device.state !== "connected") {
+          pruneViewer(body.device.id);
+          closeProxyPeer(body.device.id);
+        }
         break;
       }
       default:
@@ -338,6 +424,10 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
     close: () =>
       new Promise<void>((resolve) => {
         closed = true;
+        for (const e of exits.values()) e.closeAll();
+        exits.clear();
+        for (const f of forwarders.values()) f.fwd.close();
+        forwarders.clear();
         hub?.close();
         sd.destroy();
         resolve();

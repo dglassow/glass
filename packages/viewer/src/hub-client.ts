@@ -229,6 +229,15 @@ export class HubClient {
     return env.body.sessions;
   }
 
+  /** Ask an agent (normally THIS Mac's own) to run a local SOCKS5 forwarder
+   *  whose traffic egresses through `exitDeviceId` (plan §7). Idempotent per
+   *  exit device; resolves with the forwarder's loopback port. */
+  async openProxyForward(agentId: string, exitDeviceId: string): Promise<number> {
+    const env = await this.request(agentId, { type: "proxy.forward.open", exitDeviceId });
+    if (env.body.type !== "proxy.forward.opened") throw requestError(env, "proxy forward");
+    return env.body.port;
+  }
+
   input(agentId: string, sessionId: string, data: string): void {
     this.rawSend(this.deviceId, agentId, { type: "session.input", sessionId: SessionId.parse(sessionId), data });
   }

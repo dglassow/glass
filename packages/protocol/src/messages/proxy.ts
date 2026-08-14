@@ -46,5 +46,44 @@ export const ProxyClose = z.object({
 });
 export type ProxyClose = z.infer<typeof ProxyClose>;
 
-export const ProxyMessage = z.discriminatedUnion("type", [ProxyOpen, ProxyOpened, ProxyData, ProxyClose]);
+/**
+ * Viewer → its LOCAL agent: run a local SOCKS5 forwarder whose channels egress
+ * through `exitDeviceId` (plan §7). The agent reuses an existing forwarder for
+ * the same exit, so this is idempotent. The listener binds loopback only.
+ */
+export const ProxyForwardOpen = z.object({
+  type: z.literal("proxy.forward.open"),
+  exitDeviceId: z.string().min(1).max(255),
+});
+export type ProxyForwardOpen = z.infer<typeof ProxyForwardOpen>;
+
+/** Agent → viewer: the forwarder is up on 127.0.0.1:port. */
+export const ProxyForwardOpened = z.object({
+  type: z.literal("proxy.forward.opened"),
+  exitDeviceId: z.string().min(1).max(255),
+  port: z.number().int().min(1).max(65535),
+});
+export type ProxyForwardOpened = z.infer<typeof ProxyForwardOpened>;
+
+/** Viewer → its local agent: tear down the forwarder for this exit device. */
+export const ProxyForwardClose = z.object({
+  type: z.literal("proxy.forward.close"),
+  exitDeviceId: z.string().min(1).max(255),
+});
+export type ProxyForwardClose = z.infer<typeof ProxyForwardClose>;
+
+/** The channel-scoped data-plane subset (everything that carries a channelId) —
+ *  what the forwarder/exit halves in agent/src/proxy/tunnel.ts speak. */
+export const ProxyChannelMessage = z.discriminatedUnion("type", [ProxyOpen, ProxyOpened, ProxyData, ProxyClose]);
+export type ProxyChannelMessage = z.infer<typeof ProxyChannelMessage>;
+
+export const ProxyMessage = z.discriminatedUnion("type", [
+  ProxyOpen,
+  ProxyOpened,
+  ProxyData,
+  ProxyClose,
+  ProxyForwardOpen,
+  ProxyForwardOpened,
+  ProxyForwardClose,
+]);
 export type ProxyMessage = z.infer<typeof ProxyMessage>;

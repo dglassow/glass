@@ -163,7 +163,7 @@ async function standalone() {
   await sleep(300);
   const agent = spawnProc("agent", [AGENT, "--sessiond", SD, "--hub", `ws://127.0.0.1:${port}`, "--device-id", "local", "--name", "This Mac"], /registered with hub/);
   await agent.ready;
-  ready({ role: "standalone", hubUrl: `ws://127.0.0.1:${port}` });
+  ready({ role: "standalone", hubUrl: `ws://127.0.0.1:${port}`, agentId: "local" });
 }
 
 async function hub() {
@@ -221,7 +221,7 @@ async function hub() {
   await sleep(300);
   const agent = spawnProc("agent", [AGENT, "--sessiond", SD, "--hub", `ws://127.0.0.1:${port}`, "--device-id", "hub-agent", "--name", "This Mac", "--key", AGENTKEY], /registered with hub/);
   await agent.ready;
-  ready({ role: "hub", hubUrl: `ws://127.0.0.1:${port}`, hubKey, ...(publicUrl ? { publicUrl } : {}) });
+  ready({ role: "hub", hubUrl: `ws://127.0.0.1:${port}`, hubKey, agentId: "hub-agent", ...(publicUrl ? { publicUrl } : {}) });
 }
 
 async function spoke() {

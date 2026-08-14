@@ -82,6 +82,7 @@ body {
 }
 .device:hover { background: #131826; }
 .device-name { flex: 1; }
+.device-browse { padding: 2px 6px; line-height: 1; }
 
 .dot {
   width: 8px;

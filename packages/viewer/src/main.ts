@@ -27,7 +27,7 @@ import { HubClient, type EnrollConfig } from "./hub-client.js";
 import { Workspace, SESSION_MIME } from "./workspace.js";
 import { loadOrCreateIdentity, loadHubConfig, saveHubConfig, type DeviceIdentity, type HubConfig } from "./auth.js";
 import { showOnboarding, type Role } from "./onboarding.js";
-import { isNative, startBackend, stopBackend, onReconfigure, onSettings, checkForUpdates, appVersion, type BackendInfo } from "./native.js";
+import { isNative, startBackend, stopBackend, onReconfigure, onSettings, checkForUpdates, appVersion, launchProxiedBrowser, type BackendInfo } from "./native.js";
 import { openTerminalSettings } from "./settings-ui.js";
 import { cmpVersions } from "./update-policy.js";
 import { DeviceId, type DeviceRecord, type DeviceRole, type EnrollCompanion } from "@glass/protocol";
@@ -193,7 +193,7 @@ async function runRole(app: HTMLElement, identity: DeviceIdentity, role: Role, s
       res = await startBackend("spoke", { hubUrl: cfg.hubUrl, ...(cfg.hubKeyPin ? { hubKeyPin: cfg.hubKeyPin } : {}) });
     }
     localStorage.setItem(ROLE_KEY, "spoke");
-    startApp(app, identity, cfg, undefined, spokeEnroll(res));
+    startApp(app, identity, cfg, res?.agentId ? { localAgentId: res.agentId } : undefined, spokeEnroll(res));
     return;
   }
 
@@ -203,7 +203,7 @@ async function runRole(app: HTMLElement, identity: DeviceIdentity, role: Role, s
     const res = await startBackend("standalone");
     localStorage.setItem(ROLE_KEY, "standalone");
     // The standalone hub is open (loopback, no auth) — connect with no pin.
-    startApp(app, identity, { hubUrl: res.hubUrl });
+    startApp(app, identity, { hubUrl: res.hubUrl }, { localAgentId: res.agentId ?? "local" });
   } else {
     const res = await startBackend("hub", { deviceId: identity.deviceId, devicePub: identity.publicKey });
     if (!res.hubKey) throw new Error("hub backend did not report its identity key");
@@ -216,7 +216,7 @@ async function runRole(app: HTMLElement, identity: DeviceIdentity, role: Role, s
       const relaunching = await checkForUpdates((msg) => showUpdating(app, msg), { attempts: 5, delayMs: 2000 });
       if (relaunching) return;
     }
-    startApp(app, identity, { hubUrl: res.hubUrl, hubKeyPin: res.hubKey }, { hubKey: res.hubKey });
+    startApp(app, identity, { hubUrl: res.hubUrl, hubKeyPin: res.hubKey }, { hubKey: res.hubKey, localAgentId: res.agentId ?? "hub-agent" });
   }
 }
 
@@ -389,7 +389,16 @@ function showSpokeScreen(app: HTMLElement, identity: DeviceIdentity, reloadAfter
   urlInput.focus();
 }
 
-function startApp(app: HTMLElement, identity: DeviceIdentity, config: HubConfig, extras?: { hubKey?: string }, enroll?: EnrollConfig): void {
+function startApp(
+  app: HTMLElement,
+  identity: DeviceIdentity,
+  config: HubConfig,
+  /** hubKey: surfaced in the sidebar for spokes. localAgentId: the agent on
+   *  THIS Mac — required for "browse via device" (it hosts the local SOCKS
+   *  forwarder); absent in a plain browser / PWA, which hides the feature. */
+  extras?: { hubKey?: string; localAgentId?: string },
+  enroll?: EnrollConfig,
+): void {
   app.replaceChildren();
 
   const sidebar = document.createElement("aside");
@@ -662,6 +671,26 @@ function startApp(app: HTMLElement, identity: DeviceIdentity, config: HubConfig,
     }
   }
 
+  /**
+   * Plan §7: browse locally, egress elsewhere. Ask THIS Mac's agent for a
+   * loopback SOCKS forwarder aimed at the chosen egress device, then launch an
+   * isolated browser profile (one per egress device — cookie jars never cross
+   * egress identities) pinned to it. Desktop only: needs the local agent and
+   * the shell's launch command.
+   */
+  async function browseVia(egressId: string, egressName: string): Promise<void> {
+    const local = extras?.localAgentId;
+    if (!local) return;
+    try {
+      statusText.textContent = `starting proxy via ${egressName}…`;
+      const port = await client.openProxyForward(local, egressId);
+      await launchProxiedBrowser({ socksHost: "127.0.0.1", socksPort: port, profileName: `egress-${egressId}` });
+      statusText.textContent = `browser launched — egress via ${egressName}`;
+    } catch (err) {
+      statusText.textContent = `browse via ${egressName} failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
   /** Attach a session that lives on another device and bring it into the workspace. */
   async function openRemote(agentId: string, sessionId: string, title: string): Promise<void> {
     remote.delete(sessionId);
@@ -710,7 +739,19 @@ function startApp(app: HTMLElement, identity: DeviceIdentity, config: HubConfig,
       newShell.textContent = "+ shell";
       newShell.disabled = !connected;
       newShell.addEventListener("click", () => void openShell(agentId, agent?.name ?? agentId));
-      row.append(dot, name, newShell);
+      row.append(dot, name);
+      // Browse-via-device (plan §7) — desktop only: needs this Mac's agent for
+      // the SOCKS forwarder and the shell to launch the isolated profile.
+      if (isNative() && extras?.localAgentId) {
+        const browse = document.createElement("button");
+        browse.className = "device-browse";
+        browse.textContent = "🌐";
+        browse.disabled = !connected;
+        browse.title = `browse the web with “${agent?.name ?? agentId}” as egress (isolated profile)`;
+        browse.addEventListener("click", () => void browseVia(agentId, agent?.name ?? agentId));
+        row.append(browse);
+      }
+      row.append(newShell);
       deviceList.append(row);
 
       for (const s of sessions.filter((x) => x.agentId === agentId)) {

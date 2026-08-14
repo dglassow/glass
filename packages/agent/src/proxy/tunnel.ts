@@ -13,10 +13,10 @@
 import net from "node:net";
 import { Duplex } from "node:stream";
 import { randomUUID } from "node:crypto";
-import type { ProxyMessage } from "@glass/protocol";
+import type { ProxyChannelMessage } from "@glass/protocol";
 import { createSocks5Server, type Socks5Options } from "./socks5.js";
 
-export type ProxySend = (msg: ProxyMessage) => void;
+export type ProxySend = (msg: ProxyChannelMessage) => void;
 
 function directDial(host: string, port: number): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
@@ -41,7 +41,7 @@ export class ProxyExit {
     private readonly opts: ProxyExitOptions = {},
   ) {}
 
-  handle(msg: ProxyMessage): void {
+  handle(msg: ProxyChannelMessage): void {
     if (msg.type === "proxy.open") this.open(msg.channelId, msg.host, msg.port);
     else if (msg.type === "proxy.data") this.channels.get(msg.channelId)?.write(Buffer.from(msg.data, "base64"));
     else if (msg.type === "proxy.close") {
@@ -141,7 +141,7 @@ export class ProxyForwarder {
     this.channels.clear();
   }
 
-  handle(msg: ProxyMessage): void {
+  handle(msg: ProxyChannelMessage): void {
     const c = this.channels.get(msg.channelId);
     if (!c) return;
     if (msg.type === "proxy.opened") {

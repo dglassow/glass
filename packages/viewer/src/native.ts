@@ -34,8 +34,9 @@ export interface BackendInfo {
   role: string;
   hubUrl: string;
   hubKey?: string;
-  /** Spoke role: the local shell-agent's identity, so the viewer can enroll it
-   *  as a companion under one approval. */
+  /** The local shell-agent's identity (all roles). Spokes also use it to
+   *  enroll the agent as a companion under one approval; every role uses it to
+   *  address "browse via device" forwarder requests at this Mac's agent. */
   agentId?: string;
   agentPub?: string;
   agentName?: string;
@@ -54,7 +55,14 @@ export interface LaunchProxiedBrowserOptions {
   socksHost: string;
   socksPort: number;
   /** Dedicated profile dir — isolation from normal browsing (distinct cookie jar). */
-  profileDir: string;
+  profileDir?: string;
+  /**
+   * Alternative to profileDir when the caller can't build absolute paths (the
+   * webview has no $HOME): the shell derives
+   * ~/.glass/desktop/browser-profiles/<sanitized name>. Exactly one of
+   * profileDir / profileName must be set.
+   */
+  profileName?: string;
   /** Optional initial URL. */
   url?: string;
 }
@@ -281,6 +289,7 @@ export async function launchProxiedBrowser(opts: LaunchProxiedBrowserOptions): P
     socksHost: opts.socksHost,
     socksPort: opts.socksPort,
     profileDir: opts.profileDir,
+    profileName: opts.profileName,
     url: opts.url,
   });
 }

@@ -131,6 +131,8 @@ Optional: **traffic proxying**. A device runs a SOCKS5 endpoint over the existin
 
 Built in Phase 6: the SOCKS5 exit + `proxy.*` tunneling live in `agent/src/proxy/`, and the desktop shell launches the isolated proxied profile.
 
+Wired end to end post-Phase 8: every agent serves as an exit for trusted peers (per-peer channel isolation, every destination logged to the agent's stderr); `proxy.forward.open` lets a viewer ask ITS OWN Mac's agent for a loopback SOCKS forwarder aimed at a chosen egress device; the sidebar's 🌐 button (desktop only) does exactly that and launches the browser with one isolated profile PER EGRESS DEVICE (`~/.glass/desktop/browser-profiles/egress-<deviceId>`), so cookie jars never cross egress identities. Forwarders are worker soft state: a blue/green swap drops live proxied connections (sessions are unaffected).
+
 ---
 
 ## 8. Enrollment

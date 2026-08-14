@@ -66,19 +66,16 @@ export class TerminalPane {
     this.refit();
 
     // xterm keeps its OWN selection (not the DOM selection), so the native Edit
-    // menu's Copy can't see it — wire Cmd+C (copy selection) / Cmd+V (paste)
-    // here. Cmd, not Ctrl, so Ctrl+C still sends SIGINT to the shell.
+    // menu's Copy can't see it — wire Cmd+C (copy selection) here. Cmd, not
+    // Ctrl, so Ctrl+C still sends SIGINT to the shell. Cmd+V is deliberately
+    // NOT wired: the Edit menu's paste (desktop) or the browser default (web)
+    // already delivers a real DOM paste event that xterm feeds to the session,
+    // honouring bracketed-paste mode. Reading the clipboard here too injected
+    // every paste twice and made WKWebView pop its paste-permission callout.
     this.term.attachCustomKeyEventHandler((e) => {
       if (e.type !== "keydown" || !e.metaKey || e.ctrlKey || e.altKey) return true;
-      const k = e.key.toLowerCase();
-      if (k === "c" && this.term.hasSelection()) {
+      if (e.key.toLowerCase() === "c" && this.term.hasSelection()) {
         void navigator.clipboard.writeText(this.term.getSelection());
-        return false;
-      }
-      if (k === "v") {
-        void navigator.clipboard.readText().then((t) => {
-          if (t) this.client.input(this.agentId, this.sessionId, t);
-        });
         return false;
       }
       return true;

@@ -577,6 +577,14 @@ function startApp(
           renderSidebar();
         }
       },
+      onSessionRenamed: (session) => {
+        // A session was renamed somewhere in the fleet (possibly by us — the
+        // broadcast echoes back). Sync pane header + sidebar entry.
+        workspace.rename(session.id, session.title);
+        const r = remote.get(session.id);
+        if (r) r.title = session.title;
+        renderSidebar();
+      },
       onError: (code, message) => {
         statusText.textContent = `error: ${code} — ${message}`;
         if (code === "hub_identity") status.dataset["state"] = "error";
@@ -706,6 +714,56 @@ function startApp(
     }
   }
 
+  /** After a successful session.rename, sync our local copies of the title.
+   *  (Other viewers sync via the session.renamed broadcast.) */
+  function applySessionRename(s: { id: string; title: string }): void {
+    workspace.rename(s.id, s.title);
+    const r = remote.get(s.id);
+    if (r) r.title = s.title;
+    renderSidebar();
+  }
+
+  /**
+   * Right-click a sidebar row (session or device): swap its name for an inline
+   * input. Enter or clicking away commits via `commit` (the rename rides the
+   * protocol, so every device's sidebar updates from the broadcast); Esc
+   * cancels; failures land in the status line.
+   */
+  function attachRenamer(item: HTMLElement, stitle: HTMLElement, commit: (name: string) => Promise<void>): void {
+    item.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      if (item.querySelector("input")) return; // already editing
+      const input = document.createElement("input");
+      input.className = "session-rename";
+      input.value = stitle.textContent ?? "";
+      input.maxLength = 80;
+      let done = false;
+      const finish = (commitIt: boolean): void => {
+        if (done) return;
+        done = true;
+        const title = input.value.trim();
+        input.replaceWith(stitle);
+        if (commitIt && title && title !== stitle.textContent) {
+          void commit(title).catch(
+            (err) => (statusText.textContent = `rename failed: ${err instanceof Error ? err.message : String(err)}`),
+          );
+        }
+      };
+      input.addEventListener("keydown", (ke) => {
+        ke.stopPropagation();
+        if (ke.key === "Enter") finish(true);
+        else if (ke.key === "Escape") finish(false);
+      });
+      input.addEventListener("blur", () => finish(true));
+      // Editing must not trigger the row's own click/drag behaviour.
+      input.addEventListener("click", (ce) => ce.stopPropagation());
+      input.addEventListener("mousedown", (ce) => ce.stopPropagation());
+      stitle.replaceWith(input);
+      input.focus();
+      input.select();
+    });
+  }
+
   /** Sidebar: each agent (device) with its sessions nested beneath it. */
   function renderSidebar(): void {
     deviceList.replaceChildren();
@@ -735,6 +793,13 @@ function startApp(
       const name = document.createElement("span");
       name.className = "device-name";
       name.textContent = agent?.name ?? agentId;
+      // Right-click renames the DEVICE (hub/spoke) fleet-wide; only meaningful
+      // for devices the hub currently knows (they're the only ones rendered
+      // with a live record anyway).
+      if (agent) {
+        row.title = "right-click to rename this device";
+        attachRenamer(row, name, (t) => client.renameDevice(agentId, t).then(() => refreshDevices()));
+      }
       const newShell = document.createElement("button");
       newShell.textContent = "+ shell";
       newShell.disabled = !connected;
@@ -773,6 +838,8 @@ function startApp(
           workspace.kill(s.sessionId);
         });
         item.append(stitle, kill);
+        item.title = "right-click to rename";
+        attachRenamer(item, stitle, (t) => client.renameSession(agentId, s.sessionId, t).then(applySessionRename));
         item.addEventListener("click", () => {
           workspace.show(s.sessionId);
           app.classList.remove("drawer-open"); // mobile: close the drawer
@@ -808,6 +875,8 @@ function startApp(
           renderSidebar();
         });
         item.append(stitle, hint, kill);
+        item.title = "right-click to rename";
+        attachRenamer(item, stitle, (t) => client.renameSession(agentId, s.sessionId, t).then(applySessionRename));
         item.addEventListener("click", () => void openRemote(agentId, s.sessionId, s.title));
         deviceList.append(item);
       }

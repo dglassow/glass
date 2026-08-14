@@ -192,6 +192,11 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
   if (opts.mode === "trust" && !trustStore) throw new Error("trust mode requires a trust store");
 
   const registry = new Map<string, Entry>();
+  // Owner-set device names in OPEN mode, where there is no trust store to
+  // persist them — keeps a rename sticky across re-hellos for this process's
+  // lifetime. (Trust mode persists renames in the trust store instead, which
+  // registration already prefers over the hello's self-reported name.)
+  const openModeNames = new Map<string, string>();
   const pendingEnrollments = new Map<string, PendingEnroll>();
   const enrollWindow: number[] = []; // recent enroll-request timestamps (rate limit)
   const credentialSessions = new Set<WebSocket>();
@@ -350,7 +355,7 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
         // Phase 1 behavior: register immediately, no proof.
         pendingProof = {
           deviceId: hello.deviceId, nonce: "", publicKey: "", helloId: env.id,
-          name: hello.deviceName, roles: hello.roles, appVersion: hello.appVersion, etchPresent: hello.etch.present,
+          name: openModeNames.get(hello.deviceId) ?? hello.deviceName, roles: hello.roles, appVersion: hello.appVersion, etchPresent: hello.etch.present,
         };
         epoch = registerAuthenticated(socket, pendingProof);
         deviceId = hello.deviceId;
@@ -678,12 +683,35 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
       case "device.enroll.decision":
         handleDecision(socket, deviceId, env, env.body.requestId, env.body.approved, env.body.verificationCode);
         break;
+      case "device.rename": {
+        // Any trusted device may name any fleet device (same authority model as
+        // enrollment approval — every trusted device is the owner's).
+        const name = env.body.name.trim();
+        if (!name) {
+          reply(socket, deviceId, { type: "error", code: "invalid_name", message: "device name must not be blank" }, env.id);
+          break;
+        }
+        const entry = registry.get(env.body.deviceId);
+        if (!entry) {
+          reply(socket, deviceId, { type: "error", code: "device_unknown", message: `no device registered as ${env.body.deviceId}` }, env.id);
+          break;
+        }
+        const trusted = trustStore?.get(env.body.deviceId);
+        if (trusted) trustStore!.add(env.body.deviceId, { ...trusted, name });
+        else openModeNames.set(env.body.deviceId, name);
+        entry.record.name = name;
+        reply(socket, deviceId, { type: "device.renamed", device: entry.record }, env.id);
+        broadcastToAuthenticated(() => ({ type: "device.state", device: entry.record }));
+        break;
+      }
       case "session.created":
       case "session.exited":
-        // An agent announced a change to its session set (a new shell opened, or
-        // one exited). Fan it out to every connected device so all viewers keep a
-        // live, fleet-wide session list — not just the viewer that opened it. The
-        // record carries deviceId, so viewers know which agent it belongs to.
+      case "session.renamed":
+        // An agent announced a change to its session set (a new shell opened,
+        // one exited, or one was renamed). Fan it out to every connected device
+        // so all viewers keep a live, fleet-wide session list — not just the
+        // viewer that made the change. The record carries deviceId, so viewers
+        // know which agent it belongs to.
         broadcastToAuthenticated(() => env.body);
         break;
       case "vault.get": {

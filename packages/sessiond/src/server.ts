@@ -158,6 +158,16 @@ export function createSessiondServer(opts?: { maxBytesPerSession?: number }): Se
         send(conn, { type: "session.listed", sessions: [...sessions.values()].map(toRecord) }, env.id);
         break;
       }
+      case "session.rename": {
+        const session = sessions.get(body.sessionId);
+        if (!session) {
+          send(conn, { type: "error", code: "session_not_found", message: `no session ${body.sessionId}` }, env.id);
+          break;
+        }
+        session.title = body.title;
+        send(conn, { type: "session.renamed", session: toRecord(session) }, env.id);
+        break;
+      }
       case "heartbeat": {
         send(conn, { type: "heartbeat.ack", sentAt: body.sentAt, receivedAt: Date.now() }, env.id);
         break;

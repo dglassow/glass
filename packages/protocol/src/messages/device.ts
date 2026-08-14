@@ -105,6 +105,23 @@ export const DeviceStateChanged = z.object({
 });
 export type DeviceStateChanged = z.infer<typeof DeviceStateChanged>;
 
+/** Any trusted device → hub: give a fleet device a human name. In trust mode
+ *  the name persists in the trust store (which registration already prefers
+ *  over the hello's self-reported deviceName), so it survives reconnects and
+ *  hub restarts. Broadcast back out as device.state. */
+export const DeviceRename = z.object({
+  type: z.literal("device.rename"),
+  deviceId: DeviceId,
+  name: z.string().min(1).max(80),
+});
+export type DeviceRename = z.infer<typeof DeviceRename>;
+
+export const DeviceRenamed = z.object({
+  type: z.literal("device.renamed"),
+  device: DeviceRecord,
+});
+export type DeviceRenamed = z.infer<typeof DeviceRenamed>;
+
 export const DeviceMessage = z.discriminatedUnion("type", [
   DeviceEnrollRequest,
   DeviceEnrollPending,
@@ -113,5 +130,7 @@ export const DeviceMessage = z.discriminatedUnion("type", [
   DeviceList,
   DeviceListed,
   DeviceStateChanged,
+  DeviceRename,
+  DeviceRenamed,
 ]);
 export type DeviceMessage = z.infer<typeof DeviceMessage>;

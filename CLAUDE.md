@@ -71,7 +71,7 @@ Verification: 19 adversarial test harnesses under `tests/`, all run by `pnpm tes
 
 ### Protocol notes
 
-`PROTOCOL_VERSION` stays 1 (unreleased); every change so far is additive. Families: `handshake` (hello/challenge/proof/ack, clientNonce + channelBinding + hub proof block, Etch detection), `device` (registry/state, `device.enroll.*` with number matching, Phase 8 enrollment fields), `session` (create/attach/stream/resize/close/exit, `session.created`/`exited` broadcasts), `credential.*` (passkeys), `vault.*`, `proxy.*`, `system` (heartbeat, structured errors, `update.available`). `protocol/src/auth.ts` holds the isomorphic signing/verification helpers; `protocol/src/redact.ts` the secret-redaction structure. Keychain/Secure-Enclave key storage stays deferred behind the `Signer` seam.
+`PROTOCOL_VERSION` stays 1 (unreleased); every change so far is additive. Families: `handshake` (hello/challenge/proof/ack, clientNonce + channelBinding + hub proof block, Etch detection), `device` (registry/state, `device.enroll.*` with number matching, Phase 8 enrollment fields, `device.rename` — owner names persist in the trust store, which registration prefers over the hello's self-reported name), `session` (create/attach/stream/resize/close/exit, `session.created`/`exited`/`renamed` broadcasts; `session.rename` stores the title in sessiond's record), `credential.*` (passkeys), `vault.*`, `proxy.*`, `system` (heartbeat, structured errors, `update.available`). `protocol/src/auth.ts` holds the isomorphic signing/verification helpers; `protocol/src/redact.ts` the secret-redaction structure. Keychain/Secure-Enclave key storage stays deferred behind the `Signer` seam.
 
 ### Not yet done
 

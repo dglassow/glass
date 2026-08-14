@@ -11,7 +11,8 @@ export interface Session {
   readonly id: SessionId;
   readonly kind: SessionKind;
   readonly deviceId: DeviceId;
-  readonly title: string;
+  /** Mutable: the owner can rename a session (session.rename). */
+  title: string;
   readonly createdAt: number;
   readonly alive: boolean;
   readonly exit: ExitInfo | null;

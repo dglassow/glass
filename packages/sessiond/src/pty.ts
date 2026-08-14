@@ -33,7 +33,7 @@ export class PtySession {
   readonly id: SessionId;
   readonly kind = "pty" as const;
   readonly deviceId: DeviceId;
-  readonly title: string;
+  title: string;
   readonly createdAt: number;
 
   private readonly pty: IPty;

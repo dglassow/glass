@@ -106,6 +106,24 @@ export const SessionExited = z.object({
 });
 export type SessionExited = z.infer<typeof SessionExited>;
 
+/** Viewer → agent: give the session a human name. The title lives in the
+ *  session record (sessiond), so it survives worker swaps and is what every
+ *  viewer's list shows. */
+export const SessionRename = z.object({
+  type: z.literal("session.rename"),
+  sessionId: SessionId,
+  title: z.string().min(1).max(80),
+});
+export type SessionRename = z.infer<typeof SessionRename>;
+
+/** Reply to the renamer AND broadcast fleet-wide (like session.created), so
+ *  every open sidebar updates live. */
+export const SessionRenamed = z.object({
+  type: z.literal("session.renamed"),
+  session: SessionRecord,
+});
+export type SessionRenamed = z.infer<typeof SessionRenamed>;
+
 export const SessionMessage = z.discriminatedUnion("type", [
   SessionCreate,
   SessionCreated,
@@ -119,5 +137,7 @@ export const SessionMessage = z.discriminatedUnion("type", [
   SessionResize,
   SessionClose,
   SessionExited,
+  SessionRename,
+  SessionRenamed,
 ]);
 export type SessionMessage = z.infer<typeof SessionMessage>;

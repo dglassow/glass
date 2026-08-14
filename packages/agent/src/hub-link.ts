@@ -206,6 +206,15 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
         if (viewer) toHub(viewer, body, env.replyTo);
         break;
       }
+      case "session.renamed": {
+        const viewer = env.replyTo ? pending.get(env.replyTo) : undefined;
+        if (env.replyTo) pending.delete(env.replyTo);
+        if (viewer) toHub(viewer, body, env.replyTo);
+        // Fleet-wide fan-out (like session.created): every sidebar shows the
+        // record's title, so every viewer must hear about the new name.
+        toHub(HUB, body);
+        break;
+      }
       case "session.output": {
         const set = attached.get(body.sessionId);
         if (set) for (const viewer of set) toHub(viewer, body);
@@ -244,7 +253,8 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
         toSessiond(env.id, body);
         break;
       }
-      case "session.list": {
+      case "session.list":
+      case "session.rename": {
         pending.set(env.id, viewer);
         toSessiond(env.id, body);
         break;

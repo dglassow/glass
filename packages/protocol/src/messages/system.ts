@@ -27,6 +27,7 @@ export const ErrorCode = z.enum([
   "secret_unknown",
   "vault_locked",
   "biometric_required",
+  "invalid_name",
   "internal",
 ]);
 export type ErrorCode = z.infer<typeof ErrorCode>;

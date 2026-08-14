@@ -18,6 +18,7 @@ export class TerminalPane {
   private readonly term: Terminal;
   private readonly fit: FitAddon;
   private readonly bg: HTMLElement;
+  private readonly titleEl: HTMLElement;
   private readonly onWindowResize = (): void => this.refit();
   private readonly unsubscribe: () => void;
 
@@ -37,6 +38,7 @@ export class TerminalPane {
     header.className = "pane-header";
     const label = document.createElement("span");
     label.textContent = title;
+    this.titleEl = label;
     const closeBtn = document.createElement("button");
     closeBtn.textContent = "✕";
     closeBtn.title = "hide from workspace (session stays live — reopen from the sidebar)";
@@ -106,6 +108,11 @@ export class TerminalPane {
 
   markDead(note: string): void {
     this.term.write(`\r\n\x1b[2m[${note}]\x1b[0m\r\n`);
+  }
+
+  /** Update the pane-header label (session was renamed). */
+  setTitle(title: string): void {
+    this.titleEl.textContent = title;
   }
 
   /** Mark this pane as the focused one in a split layout. */

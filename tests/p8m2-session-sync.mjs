@@ -9,6 +9,11 @@
  *   - live create: a session opened while both are connected is pushed to the
  *     other viewer (agent -> hub broadcast -> onSessionAppeared);
  *   - live exit: closing a session notifies the non-attached viewer too;
+ *   - rename: session.rename updates the record in sessiond and broadcasts
+ *     session.renamed fleet-wide (both viewers see the new title);
+ *   - device rename: device.rename persists in the trust store (registration
+ *     prefers it over the hello's self-reported name, so it survives an agent
+ *     restart) and broadcasts device.state;
  *   - exited sessions stay listed with alive=false (UIs must filter them);
  *   - zombie panes: when sessiond dies and comes back empty, a viewer's
  *     auto-reattach of a now-vanished session must surface onExited (dead
@@ -109,9 +114,13 @@ async function run() {
   const bExited = [];
   const bScroll = new Map();
   let bConn = 0;
+  const bRenamed = [];
+  const bDeviceNames = [];
   B = new HubClient(url, "viewer-b", "B", {
     onConnected: () => bConn++,
     onSessionAppeared: (s) => bAppeared.push(s.id),
+    onSessionRenamed: (s) => bRenamed.push(`${s.id}:${s.title}`),
+    onDeviceState: (d) => bDeviceNames.push(`${d.id}:${d.name}`),
     onExited: (sid) => bExited.push(sid),
     onScrollback: (sid, sb) => bScroll.set(sid, sb),
     onOutput: (sid, d) => bScroll.set(sid, (bScroll.get(sid) ?? "") + d),
@@ -139,6 +148,24 @@ async function run() {
   await waitUntil(() => bExited.includes(s1.id), "B notified of the exit");
   check("live exit: closing a session notifies the other viewer", bExited.includes(s1.id));
 
+  // ---- rename: title lives in sessiond's record and broadcasts fleet-wide ----
+  const renamed = await A.renameSession("agent-pro", s2.id, "deploy watcher");
+  check("rename: reply carries the updated record", renamed.title === "deploy watcher");
+  await waitUntil(() => bRenamed.includes(`${s2.id}:deploy watcher`), "B hears the rename broadcast");
+  check("rename: other viewers hear session.renamed live", bRenamed.includes(`${s2.id}:deploy watcher`));
+  const relisted = await B.listSessions("agent-pro");
+  check("rename: the new title persists in the agent's session list", relisted.some((s) => s.id === s2.id && s.title === "deploy watcher"));
+  const badRename = await A.renameSession("agent-pro", randomUUID(), "x").then(() => "renamed", (e) => String(e.message));
+  check("rename: unknown session refuses with session_not_found", badRename.includes("session_not_found"), badRename);
+
+  // ---- device rename: persists in the trust store, broadcast as device.state ----
+  const renamedDev = await A.renameDevice("agent-pro", "Pro Max");
+  check("device rename: reply carries the updated record", renamedDev.name === "Pro Max");
+  await waitUntil(() => bDeviceNames.includes("agent-pro:Pro Max"), "B hears the device.state broadcast");
+  check("device rename: other viewers hear device.state live", bDeviceNames.includes("agent-pro:Pro Max"));
+  const badDev = await A.renameDevice("no-such-device", "x").then(() => "renamed", (e) => String(e.message));
+  check("device rename: unknown device refuses", badDev.includes("device_unknown"), badDev);
+
   // ---- exited sessions stay in the list, flagged dead (UIs filter on alive) ----
   const afterExit = await B.listSessions("agent-pro");
   check("records: an exited session stays listed with alive=false", afterExit.some((s) => s.id === s1.id && s.alive === false));
@@ -157,6 +184,11 @@ async function run() {
   await agent.ready;
   await waitUntil(() => aExited.includes(s2.id), "A told its held session is gone");
   check("zombie pane: re-attach to a vanished session surfaces onExited", aExited.includes(s2.id), s2.id.slice(0, 8));
+
+  // The restarted agent re-helloed with its ORIGINAL --name "Pro"; the trust
+  // store name must win, so the owner's rename survives the restart.
+  const devices = await A.listDevices();
+  check("device rename: survives an agent restart (trust store wins the hello)", devices.some((d) => d.id === "agent-pro" && d.name === "Pro Max"));
 
   check("no crash: both viewers still connected", aConn === 1 && bConn === 1, `A=${aConn} B=${bConn}`);
 }

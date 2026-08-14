@@ -54,6 +54,8 @@ export interface HubClientEvents {
   onExited?: (sessionId: string, exitCode: number | null, signal: string | null) => void;
   /** A session (possibly on another device) was created somewhere in the fleet. */
   onSessionAppeared?: (session: SessionRecord) => void;
+  /** A session anywhere in the fleet was renamed (session.rename broadcast). */
+  onSessionRenamed?: (session: SessionRecord) => void;
   onError?: (code: string, message: string) => void;
   /** The hub reports a build available at its update origin. Advisory: the UI
    *  compares it to the running app version and may nag. Install stays gated. */
@@ -229,6 +231,22 @@ export class HubClient {
     return env.body.sessions;
   }
 
+  /** Rename a fleet device. Trust-mode hubs persist the name in the trust
+   *  store (survives reconnects + hub restarts); everyone hears device.state. */
+  async renameDevice(targetDeviceId: string, name: string): Promise<DeviceRecord> {
+    const env = await this.request(HUB, { type: "device.rename", deviceId: DeviceId.parse(targetDeviceId), name });
+    if (env.body.type !== "device.renamed") throw requestError(env, "rename device");
+    return env.body.device;
+  }
+
+  /** Rename a session on an agent; the new title lives in the session record
+   *  (survives worker swaps) and is broadcast to every viewer. */
+  async renameSession(agentId: string, sessionId: string, title: string): Promise<SessionRecord> {
+    const env = await this.request(agentId, { type: "session.rename", sessionId: SessionId.parse(sessionId), title });
+    if (env.body.type !== "session.renamed") throw requestError(env, "rename");
+    return env.body.session;
+  }
+
   /** Ask an agent (normally THIS Mac's own) to run a local SOCKS5 forwarder
    *  whose traffic egresses through `exitDeviceId` (plan §7). Idempotent per
    *  exit device; resolves with the forwarder's loopback port. */
@@ -372,6 +390,10 @@ export class HubClient {
         // Unsolicited (a create reply is matched above by replyTo): a session
         // appeared elsewhere in the fleet — surface it for the sidebar.
         this.events.onSessionAppeared?.(body.session);
+        break;
+      case "session.renamed":
+        // Unsolicited broadcast (the renamer's own reply matches replyTo above).
+        this.events.onSessionRenamed?.(body.session);
         break;
       case "session.output":
         this.events.onOutput?.(body.sessionId, body.data, body.seq);

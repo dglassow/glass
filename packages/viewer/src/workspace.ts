@@ -85,6 +85,14 @@ export class Workspace {
   has(sessionId: string): boolean {
     return this.sessions.has(sessionId);
   }
+  /** Session was renamed (here or on another device): sync title + pane header. */
+  rename(sessionId: string, title: string): void {
+    const s = this.sessions.get(sessionId);
+    if (!s || s.title === title) return;
+    s.title = title;
+    s.pane.setTitle(title);
+    this.onChange();
+  }
 
   // ---- output routing ---------------------------------------------------
   write(sessionId: string, data: string): void {

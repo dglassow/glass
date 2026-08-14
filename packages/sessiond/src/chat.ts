@@ -18,7 +18,7 @@ export class ChatSession implements Session {
   readonly id: SessionId;
   readonly kind = "chat" as const;
   readonly deviceId: DeviceId;
-  readonly title = "chat";
+  title = "chat";
   readonly createdAt: number;
 
   private seq = 0;

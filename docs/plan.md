@@ -121,6 +121,8 @@ glass/
 
 Session list (sidebar) + tiling pane area. Type badges, device labels, live status. Sessions detach and reattach across panes and Viewers without dying. PWA collapses to a single chat surface.
 
+Right-click a session or device row to rename it inline. Session titles live in sessiond's record (`session.rename`, broadcast fleet-wide); device names persist in the hub's trust store (`device.rename`), which registration prefers over a device's self-reported hello name — so both survive reconnects and restarts.
+
 ---
 
 ## 7. Browser

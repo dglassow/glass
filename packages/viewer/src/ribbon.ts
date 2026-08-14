@@ -33,6 +33,17 @@ export interface Ribbon {
   el: HTMLElement;
   /** Declare a widget as available. Idempotent per id (last wins). */
   register: (widget: RibbonWidget) => void;
+  /** Withdraw a widget (e.g. a deleted skill). The user's pin entry is kept —
+   *  ids without a live widget simply don't render (version-skew rule). */
+  unregister: (id: string) => void;
+  /** Programmatic pin (e.g. a freshly created skill lands on the bar). */
+  pin: (id: string) => void;
+}
+
+export interface RibbonOptions {
+  /** Optional extra action in the customize dialog (e.g. "Skills…"). */
+  manageLabel?: string;
+  onManage?: () => void;
 }
 
 const KEY = "glass.ribbon";
@@ -53,7 +64,7 @@ function saveState(state: RibbonState): void {
   }
 }
 
-export function createRibbon(): Ribbon {
+export function createRibbon(opts: RibbonOptions = {}): Ribbon {
   const widgets = new Map<string, RibbonWidget>();
   let state = loadState();
 
@@ -123,7 +134,9 @@ export function createRibbon(): Ribbon {
       if (widgets.size === 0) {
         const empty = document.createElement("div");
         empty.className = "ribbon-config-empty";
-        empty.textContent = "No widgets available yet — future releases will add some. Anything you pin here shows on the right-side ribbon.";
+        empty.textContent = opts.onManage
+          ? "Nothing to pin yet — anything you pin here shows on the right-side ribbon."
+          : "No widgets available yet — future releases will add some. Anything you pin here shows on the right-side ribbon.";
         list.append(empty);
         return;
       }
@@ -175,11 +188,24 @@ export function createRibbon(): Ribbon {
     };
     renderList();
 
+    const foot = document.createElement("div");
+    foot.className = "ribbon-config-foot";
+    if (opts.onManage && opts.manageLabel) {
+      const manageBtn = document.createElement("button");
+      manageBtn.className = "update-banner-btn";
+      manageBtn.textContent = opts.manageLabel;
+      manageBtn.addEventListener("click", () => {
+        close();
+        opts.onManage!();
+      });
+      foot.append(manageBtn);
+    }
     const closeBtn = document.createElement("button");
     closeBtn.className = "update-banner-btn";
     closeBtn.textContent = "Close";
     closeBtn.addEventListener("click", close);
-    panel.append(title, list, closeBtn);
+    foot.append(closeBtn);
+    panel.append(title, list, foot);
     o.append(panel);
     document.body.append(o);
     overlay = o;
@@ -191,6 +217,13 @@ export function createRibbon(): Ribbon {
     register(widget) {
       widgets.set(widget.id, widget);
       renderItems();
+    },
+    unregister(id) {
+      widgets.delete(id);
+      renderItems();
+    },
+    pin(id) {
+      apply(pin(state, id));
     },
   };
 }

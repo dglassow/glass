@@ -31,6 +31,8 @@ import { isNative, startBackend, stopBackend, onReconfigure, onSettings, checkFo
 import { openTerminalSettings } from "./settings-ui.js";
 import { cmpVersions } from "./update-policy.js";
 import { createRibbon } from "./ribbon.js";
+import { skillInput, type Skill } from "./skills.js";
+import { loadSkills, openSkillsEditor } from "./skills-ui.js";
 import { DeviceId, type DeviceRecord, type DeviceRole, type EnrollCompanion } from "@glass/protocol";
 
 /** Build the enrollment config for a spoke: enroll the viewer, with the local
@@ -670,10 +672,39 @@ function startApp(
   backdrop.className = "drawer-backdrop";
   backdrop.addEventListener("click", () => app.classList.remove("drawer-open"));
 
-  // Right-side ribbon (customizable widget dock). Nothing registers a widget
-  // yet — future ones call ribbon.register({ id, title, icon, activate }) here
-  // and the user pins/orders them via its customize dialog.
-  const ribbon = createRibbon();
+  // Right-side ribbon (customizable widget dock). Built-in widgets would call
+  // ribbon.register({ id, title, icon, activate }) here; today the available
+  // list is the user's own skills — scripts whose ribbon button types them
+  // into the FOCUSED session (exactly like typing; a skill can't do anything
+  // the keyboard can't, and there's no active session -> it's a no-op).
+  const knownSkills = new Set<string>();
+  const registerSkill = (skill: Skill): void => {
+    knownSkills.add(skill.id);
+    ribbon.register({
+      id: skill.id,
+      title: skill.name,
+      icon: skill.icon,
+      activate: () => {
+        const target = workspace.sessionList().find((s) => s.focused && s.visible);
+        if (target) client.input(target.agentId, target.sessionId, skillInput(skill));
+      },
+    });
+  };
+  const ribbon = createRibbon({
+    manageLabel: "Skills…",
+    onManage: () =>
+      openSkillsEditor((skill, id) => {
+        if (!skill) {
+          knownSkills.delete(id);
+          ribbon.unregister(id);
+          return;
+        }
+        const isNew = !knownSkills.has(id);
+        registerSkill(skill);
+        if (isNew) ribbon.pin(id); // a freshly created skill lands on the bar
+      }),
+  });
+  for (const s of loadSkills()) registerSkill(s);
   app.classList.add("has-ribbon");
 
   app.append(sidebar, workspace.el, ribbon.el, menuBtn, backdrop, updateBanner);

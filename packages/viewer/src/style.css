@@ -812,6 +812,32 @@ button.tset-done:hover { background: #1d2536; }
 .ribbon-config-icon { width: 20px; text-align: center; }
 .ribbon-config-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ribbon-config-empty { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.ribbon-config-foot { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* Skill editor fields (skills-ui.ts, inside .tset-panel). */
+.skill-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.skill-field > span {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+.skill-field input,
+.skill-field textarea {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: 12px/1.5 var(--mono);
+}
+.skill-field textarea { resize: vertical; }
+.skill-icon-input { width: 64px; }
+.skill-enter { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 6px; }
 
 /* ---- mobile / PWA (<720px): sidebar becomes a slide-out drawer ---------- */
 

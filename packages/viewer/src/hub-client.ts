@@ -202,7 +202,7 @@ export class HubClient {
       cols: opts.cols ?? 80,
       rows: opts.rows ?? 24,
     });
-    if (env.body.type !== "session.created") throw new Error(bodyError(env, "create"));
+    if (env.body.type !== "session.created") throw requestError(env, "create");
     this.active.set(env.body.session.id, agentId);
     return env.body.session;
   }
@@ -211,14 +211,21 @@ export class HubClient {
   async attach(agentId: string, sessionId: string): Promise<SessionRecord> {
     this.active.set(sessionId, agentId);
     const env = await this.request(agentId, { type: "session.attach", sessionId: SessionId.parse(sessionId) });
-    if (env.body.type !== "session.attached") throw new Error(bodyError(env, "attach"));
+    if (env.body.type !== "session.attached") {
+      const err = requestError(env, "attach");
+      // A missing session is gone for good (sessiond restarted, or the shell
+      // exited while we were away) — stop holding it, or every reconnect would
+      // retry an attach that can never succeed.
+      if (err.code === "session_not_found") this.active.delete(sessionId);
+      throw err;
+    }
     return env.body.session;
   }
 
   /** Enumerate the sessions an agent currently owns (for fleet-wide discovery). */
   async listSessions(agentId: string): Promise<SessionRecord[]> {
     const env = await this.request(agentId, { type: "session.list" });
-    if (env.body.type !== "session.listed") throw new Error(bodyError(env, "list"));
+    if (env.body.type !== "session.listed") throw requestError(env, "list");
     return env.body.sessions;
   }
 
@@ -410,7 +417,14 @@ export class HubClient {
   private async reattach(agentId: string, sessionId: string): Promise<void> {
     try {
       await this.attach(agentId, sessionId);
-    } catch {
+    } catch (err) {
+      // Permanent failure: the session no longer exists anywhere. Surface it as
+      // an exit so the UI marks the pane dead instead of leaving a zombie pane
+      // that keeps its scrollback and silently swallows keystrokes.
+      if (err instanceof RequestError && err.code === "session_not_found") {
+        this.events.onExited?.(sessionId, null, null);
+        return;
+      }
       /* the agent may not be ready yet; a later device.state will retry */
     }
   }
@@ -437,8 +451,22 @@ export class HubClient {
   }
 }
 
-function bodyError(env: Envelope, what: string): string {
-  return env.body.type === "error" ? `${what}: ${env.body.code} — ${env.body.message}` : `${what}: unexpected ${env.body.type}`;
+/** A request that came back as a protocol error (or an unexpected body). */
+export class RequestError extends Error {
+  constructor(
+    message: string,
+    /** Structured protocol error code (e.g. "session_not_found"), if the reply was an error body. */
+    readonly code?: string,
+  ) {
+    super(message);
+    this.name = "RequestError";
+  }
+}
+
+function requestError(env: Envelope, what: string): RequestError {
+  return env.body.type === "error"
+    ? new RequestError(`${what}: ${env.body.code} — ${env.body.message}`, env.body.code)
+    : new RequestError(`${what}: unexpected ${env.body.type}`);
 }
 
 function safeJson(text: string): unknown {

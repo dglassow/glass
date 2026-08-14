@@ -8,7 +8,11 @@
  *   - attach: it attaches to that remote session and replays its scrollback;
  *   - live create: a session opened while both are connected is pushed to the
  *     other viewer (agent -> hub broadcast -> onSessionAppeared);
- *   - live exit: closing a session notifies the non-attached viewer too.
+ *   - live exit: closing a session notifies the non-attached viewer too;
+ *   - exited sessions stay listed with alive=false (UIs must filter them);
+ *   - zombie panes: when sessiond dies and comes back empty, a viewer's
+ *     auto-reattach of a now-vanished session must surface onExited (dead
+ *     pane), not retry silently forever.
  *
  * Run after `pnpm build && pnpm --filter @glass/viewer build:lib`:
  *   node tests/p8m2-session-sync.mjs
@@ -88,8 +92,9 @@ async function run() {
 
   // ---- Viewer A: connect + open a shell + write a marker into it ----
   const aOut = new Map();
+  const aExited = [];
   let aConn = 0;
-  A = new HubClient(url, "viewer-a", "A", { onConnected: () => aConn++, onOutput: (sid, d) => aOut.set(sid, (aOut.get(sid) ?? "") + d) }, va.signer, pin);
+  A = new HubClient(url, "viewer-a", "A", { onConnected: () => aConn++, onExited: (sid) => aExited.push(sid), onOutput: (sid, d) => aOut.set(sid, (aOut.get(sid) ?? "") + d) }, va.signer, pin);
   A.connect();
   await waitUntil(() => aConn > 0, "A connected");
   const s1 = await A.createSession("agent-pro", { kind: "pty" });
@@ -133,6 +138,25 @@ async function run() {
   A.closeSession("agent-pro", s1.id);
   await waitUntil(() => bExited.includes(s1.id), "B notified of the exit");
   check("live exit: closing a session notifies the other viewer", bExited.includes(s1.id));
+
+  // ---- exited sessions stay in the list, flagged dead (UIs filter on alive) ----
+  const afterExit = await B.listSessions("agent-pro");
+  check("records: an exited session stays listed with alive=false", afterExit.some((s) => s.id === s1.id && s.alive === false));
+
+  // ---- zombie panes: sessiond dies (taking every PTY); the agent comes back
+  // ---- over an EMPTY sessiond. A still holds s2; its auto-reattach must get
+  // ---- session_not_found and surface onExited — not leave a live-looking pane.
+  aExited.length = 0;
+  agent.cp.kill("SIGKILL");
+  sessiond.cp.kill("SIGKILL");
+  await sleep(200);
+  rmSync(SD, { force: true });
+  sessiond = startProc("sessiond", [SESSIOND, "--socket", SD], /listening on/);
+  await sessiond.ready;
+  agent = startProc("agent", [AGENT, "--sessiond", SD, "--hub", url, "--device-id", "agent-pro", "--name", "Pro", "--key", agentKeyFile], /registered with hub/);
+  await agent.ready;
+  await waitUntil(() => aExited.includes(s2.id), "A told its held session is gone");
+  check("zombie pane: re-attach to a vanished session surfaces onExited", aExited.includes(s2.id), s2.id.slice(0, 8));
 
   check("no crash: both viewers still connected", aConn === 1 && bConn === 1, `A=${aConn} B=${bConn}`);
 }

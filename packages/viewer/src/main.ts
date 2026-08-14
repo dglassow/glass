@@ -630,6 +630,7 @@ function startApp(app: HTMLElement, identity: DeviceIdentity, config: HubConfig,
         }
         for (const [sid, r] of remote) if (r.agentId === a.id) remote.delete(sid);
         for (const s of list) {
+          if (!s.alive) continue; // already exited — nothing to attach to
           if (workspace.has(s.id)) continue; // already attached locally
           remote.set(s.id, { agentId: a.id, title: s.title });
         }

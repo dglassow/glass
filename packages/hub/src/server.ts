@@ -55,6 +55,7 @@ import type { GitStore } from "./git/git-store.js";
 import { createGitHttpHandler } from "./git/git-http.js";
 import { createStaticHandler } from "./web-static.js";
 import { createUpdatesHandler } from "./updates-http.js";
+import { RunStore } from "./run-store.js";
 
 const APP_VERSION = "0.0.0";
 const HANDSHAKE_TIMEOUT_MS = 5000;
@@ -100,6 +101,7 @@ interface PendingProof {
   etchPresent: boolean;
   imessagePresent: boolean;
   imessageAccount?: string;
+  providers?: import("@glass/protocol").ProviderRecord[];
 }
 
 interface PendingEnroll {
@@ -173,6 +175,8 @@ export interface HubServerOptions {
   webRoot?: string;
   /** Desktop auto-update artifacts (latest.json + signed .app.tar.gz) under /updates/. */
   updatesRoot?: string;
+  /** Durable Glass run/workspace metadata store. */
+  runStore?: RunStore;
   /**
    * Additional listeners beyond the primary (host/port/tls/gitStore/webRoot).
    * All share this hub's registry, trust store, and auth handler. Used to run a
@@ -205,6 +209,7 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
   const liveness = new WeakMap<WebSocket, boolean>();
   const credentialStore = opts.credentialStore;
   const passkey = opts.passkey;
+  const runStore = opts.runStore ?? new RunStore();
   let epochCounter = 0;
 
   // Listeners are created after the connection handler is defined (see the
@@ -328,6 +333,7 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
       etchPresent: pp.etchPresent,
       imessagePresent: pp.imessagePresent,
       ...(pp.imessageAccount !== undefined ? { imessageAccount: pp.imessageAccount } : {}),
+      ...(pp.providers !== undefined ? { providers: pp.providers } : {}),
     };
     registry.set(pp.deviceId, { socket, record, epoch });
     reply(
@@ -384,6 +390,7 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
           name: openModeNames.get(hello.deviceId) ?? hello.deviceName, roles: hello.roles, appVersion: hello.appVersion, etchPresent: hello.etch.present,
           imessagePresent: hello.imessage?.present ?? false,
           ...(hello.imessage?.account !== undefined ? { imessageAccount: hello.imessage.account } : {}),
+          ...(hello.providers !== undefined ? { providers: hello.providers } : {}),
         };
         epoch = registerAuthenticated(socket, pendingProof);
         deviceId = hello.deviceId;
@@ -402,6 +409,7 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
         name: trusted.name, roles: trusted.roles, appVersion: hello.appVersion, etchPresent: hello.etch.present,
         imessagePresent: hello.imessage?.present ?? false,
         ...(hello.imessage?.account !== undefined ? { imessageAccount: hello.imessage.account } : {}),
+        ...(hello.providers !== undefined ? { providers: hello.providers } : {}),
       };
       state = "await-proof";
 
@@ -696,7 +704,10 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
       return void reply(socket, deviceId, { type: "error", code: "version_incompatible", message: `envelope v=${env.v} is not supported` }, env.id);
     }
     const self = registry.get(deviceId);
-    if (self) self.record.lastSeen = Date.now();
+    if (!self || self.socket !== socket) {
+      return void socket.close(4011, "superseded device connection");
+    }
+    self.record.lastSeen = Date.now();
 
     if (env.to === HUB) return void handleHubMessage(socket, deviceId, env);
     route(socket, deviceId, env);
@@ -743,6 +754,48 @@ export function startHubServer(opts: HubServerOptions): Promise<HubServer> {
         // viewer that made the change. The record carries deviceId, so viewers
         // know which agent it belongs to.
         broadcastToAuthenticated(() => env.body);
+        break;
+      case "run.created":
+      case "run.updated": {
+        const sender = registry.get(deviceId)?.record;
+        if (!sender?.roles.includes("agent") || env.body.run.deviceId !== deviceId) {
+          reply(socket, deviceId, { type: "error", code: "unauthorized", message: "only the owning Agent may publish run metadata" }, env.id);
+          break;
+        }
+        if (runStore.putRun(env.body.run)) broadcastToAuthenticated(() => env.body);
+        break;
+      }
+      case "run.inventory.snapshot": {
+        const sender = registry.get(deviceId)?.record;
+        if (!sender?.roles.includes("agent") || env.body.deviceId !== deviceId) {
+          reply(socket, deviceId, { type: "error", code: "unauthorized", message: "only the owning Agent may reconcile run inventory" }, env.id);
+          break;
+        }
+        sender.sessiondInstanceId = env.body.instanceId;
+        broadcastToAuthenticated(() => ({ type: "device.state", device: sender }));
+        const reconciled = runStore.reconcileDevice(deviceId, env.body.runs);
+        console.error(`hub: reconciled sessiond inventory for ${deviceId} (${env.body.runs.length} live, ${reconciled.length} changed)`);
+        for (const run of reconciled) {
+          broadcastToAuthenticated(() => ({ type: "run.updated", run }));
+        }
+        break;
+      }
+      case "run.event":
+        // Run content is point-to-point through the owning Agent. Receiving it
+        // here indicates an old/misbehaving Agent; deliberately do not relay
+        // it or persist it. Provider-native transcripts/checkpoints remain the
+        // authoritative content store.
+        break;
+      case "run.list":
+        reply(socket, deviceId, { type: "run.listed", runs: runStore.listRuns(env.body.deviceId) }, env.id);
+        break;
+      case "workspace.put":
+        if (runStore.putWorkspace(env.body.workspace)) {
+          broadcastToAuthenticated(() => ({ type: "workspace.listed", workspaces: runStore.listWorkspaces() }));
+        }
+        break;
+      case "workspace.list":
+        reply(socket, deviceId, { type: "workspace.listed", workspaces: runStore.listWorkspaces() }, env.id);
         break;
       case "vault.get": {
         if (!opts.vault) {

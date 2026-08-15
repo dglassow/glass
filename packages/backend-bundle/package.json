@@ -7,6 +7,7 @@
   "dependencies": {
     "@glass/hub": "workspace:*",
     "@glass/sessiond": "workspace:*",
-    "@glass/agent": "workspace:*"
+    "@glass/agent": "workspace:*",
+    "@glass/supervisor": "workspace:*"
   }
 }

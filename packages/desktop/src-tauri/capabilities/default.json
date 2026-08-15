@@ -10,6 +10,7 @@
     "allow-start-backend",
     "allow-stop-backend",
     "allow-backend-status",
+    "allow-apply-backend-update",
     "updater:default",
     "process:default"
   ]

@@ -23,6 +23,7 @@ import {
   HUB,
   DeviceId,
   SessionId,
+  RunId,
   type Body,
   type Envelope,
   type DeviceRecord,
@@ -33,6 +34,13 @@ import {
   type Signer,
   type IMessageConversation,
   type IMessageItem,
+  type RunControl,
+  type RunEventRecord,
+  type RunProvider,
+  type RunRecord,
+  type RunQueryName,
+  type WorkspaceRecord,
+  type RunWorktreeMode,
 } from "@glass/protocol";
 
 /** Lets an untrusted device self-enroll (number match) instead of failing. */
@@ -58,6 +66,10 @@ export interface HubClientEvents {
   onSessionAppeared?: (session: SessionRecord) => void;
   /** A session anywhere in the fleet was renamed (session.rename broadcast). */
   onSessionRenamed?: (session: SessionRecord) => void;
+  onRunAppeared?: (run: RunRecord) => void;
+  onRunUpdated?: (run: RunRecord) => void;
+  onRunEvent?: (event: RunEventRecord) => void;
+  onWorkspaces?: (workspaces: WorkspaceRecord[]) => void;
   onError?: (code: string, message: string) => void;
   /** A new iMessage appeared on a watched agent (either direction). */
   onIMessageNew?: (agentId: string, message: IMessageItem) => void;
@@ -90,6 +102,8 @@ export class HubClient {
   private pending = new Map<string, Pending>();
   /** Sessions this viewer holds, sessionId -> agentId, for auto re-attach. */
   private readonly active = new Map<string, string>();
+  /** Structured provider runs watched by this viewer, runId -> agentId. */
+  private readonly activeRuns = new Map<string, string>();
   private reconnectDelay = 250;
   private closed = false;
   /** Fresh per-connection nonce the hub must sign when a pin is set (mutual auth). */
@@ -212,6 +226,120 @@ export class HubClient {
     if (env.body.type !== "session.created") throw requestError(env, "create");
     this.active.set(env.body.session.id, agentId);
     return env.body.session;
+  }
+
+  /** Create a durable provider run. Etch is the primary/default provider. */
+  async createRun(
+    agentId: string,
+    opts: {
+      provider?: RunProvider;
+      title?: string;
+      cwd?: string;
+      prompt?: string;
+      model?: string;
+      profile?: string;
+      modelProvider?: string;
+      reasoningEffort?: string;
+      fast?: boolean;
+      providerSessionId?: string;
+      providerStoredSessionId?: string;
+      worktreeRef?: RunRecord["worktreeRef"];
+      worktreeMode?: RunWorktreeMode;
+    } = {},
+  ): Promise<RunRecord> {
+    const env = await this.request(agentId, {
+      type: "run.create",
+      deviceId: DeviceId.parse(agentId),
+      provider: opts.provider ?? "etch",
+      ...(opts.title ? { title: opts.title } : {}),
+      ...(opts.cwd ? { cwd: opts.cwd } : {}),
+      ...(opts.prompt ? { prompt: opts.prompt } : {}),
+      ...(opts.model ? { model: opts.model } : {}),
+      ...(opts.profile ? { profile: opts.profile } : {}),
+      ...(opts.modelProvider ? { modelProvider: opts.modelProvider } : {}),
+      ...(opts.reasoningEffort ? { reasoningEffort: opts.reasoningEffort } : {}),
+      ...(opts.fast !== undefined ? { fast: opts.fast } : {}),
+      ...(opts.providerSessionId ? { providerSessionId: opts.providerSessionId } : {}),
+      ...(opts.providerStoredSessionId ? { providerStoredSessionId: opts.providerStoredSessionId } : {}),
+      ...(opts.worktreeRef ? { worktreeRef: opts.worktreeRef } : {}),
+      worktreeMode: opts.worktreeMode ?? "shared",
+    }, 15000);
+    if (env.body.type !== "run.created") throw requestError(env, "create run");
+    this.activeRuns.set(env.body.run.id, agentId);
+    return env.body.run;
+  }
+
+  /** List the Hub's durable run metadata across the fleet. */
+  async listRuns(deviceId?: string): Promise<RunRecord[]> {
+    const env = await this.request(HUB, { type: "run.list", ...(deviceId ? { deviceId: DeviceId.parse(deviceId) } : {}) });
+    if (env.body.type !== "run.listed") throw requestError(env, "list runs");
+    return env.body.runs;
+  }
+
+  /** Subscribe to one live run and replay events newer than `since`. */
+  async subscribeRun(agentId: string, runId: string, since = 0): Promise<RunRecord> {
+    this.activeRuns.set(runId, agentId);
+    const env = await this.request(agentId, { type: "run.subscribe", runId: RunId.parse(runId), since }, 15000);
+    if (env.body.type !== "run.snapshot") {
+      const err = requestError(env, "subscribe run");
+      if (err.code === "run_not_found") this.activeRuns.delete(runId);
+      throw err;
+    }
+    this.events.onRunUpdated?.(env.body.run);
+    for (const event of env.body.events) this.events.onRunEvent?.(event);
+    return env.body.run;
+  }
+
+  submitRun(agentId: string, runId: string, text: string): void {
+    this.rawSend(this.deviceId, agentId, { type: "run.submit", runId: RunId.parse(runId), text });
+  }
+
+  respondRun(agentId: string, runId: string, requestId: string, response: string): void {
+    this.rawSend(this.deviceId, agentId, { type: "run.respond", runId: RunId.parse(runId), requestId, response });
+  }
+
+  controlRun(agentId: string, runId: string, action: RunControl["action"], targetId?: string): void {
+    this.rawSend(this.deviceId, agentId, {
+      type: "run.control",
+      runId: RunId.parse(runId),
+      action,
+      ...(targetId ? { targetId } : {}),
+    });
+  }
+
+  async queryRun(agentId: string, runId: string, query: RunQueryName): Promise<Record<string, unknown>> {
+    const requestId = randomId();
+    const env = await this.request(agentId, { type: "run.query", runId: RunId.parse(runId), requestId, query }, 15000);
+    if (env.body.type !== "run.queried") throw requestError(env, `query run ${query}`);
+    return env.body.result;
+  }
+
+  async attachRunFile(
+    agentId: string,
+    runId: string,
+    input: { path?: string; dataUrl?: string; name?: string },
+  ): Promise<Record<string, unknown>> {
+    const requestId = randomId();
+    const env = await this.request(agentId, {
+      type: "run.attach",
+      runId: RunId.parse(runId),
+      requestId,
+      ...(input.path ? { path: input.path } : {}),
+      ...(input.dataUrl ? { dataUrl: input.dataUrl } : {}),
+      ...(input.name ? { name: input.name } : {}),
+    }, 30000);
+    if (env.body.type !== "run.file-attached") throw requestError(env, "attach run file");
+    return env.body.result;
+  }
+
+  async listWorkspaces(): Promise<WorkspaceRecord[]> {
+    const env = await this.request(HUB, { type: "workspace.list" });
+    if (env.body.type !== "workspace.listed") throw requestError(env, "list workspaces");
+    return env.body.workspaces;
+  }
+
+  putWorkspace(workspace: WorkspaceRecord): void {
+    this.rawSend(this.deviceId, HUB, { type: "workspace.put", workspace });
   }
 
   /** Attach to an existing session; the scrollback arrives via onScrollback. */
@@ -427,6 +555,7 @@ export class HubClient {
         // Re-attach anything we were holding (viewer-driven recovery after our
         // own reconnect). Agent-side recovery is handled by onDeviceState below.
         for (const [sessionId, agentId] of this.active) void this.reattach(agentId, sessionId);
+        for (const [runId, agentId] of this.activeRuns) void this.resubscribeRun(agentId, runId);
       }
       return;
     }
@@ -453,6 +582,18 @@ export class HubClient {
         // Unsolicited broadcast (the renamer's own reply matches replyTo above).
         this.events.onSessionRenamed?.(body.session);
         break;
+      case "run.created":
+        this.events.onRunAppeared?.(body.run);
+        break;
+      case "run.updated":
+        this.events.onRunUpdated?.(body.run);
+        break;
+      case "run.event":
+        this.events.onRunEvent?.(body.event);
+        break;
+      case "workspace.listed":
+        this.events.onWorkspaces?.(body.workspaces);
+        break;
       case "session.output":
         this.events.onOutput?.(body.sessionId, body.data, body.seq);
         break;
@@ -469,6 +610,9 @@ export class HubClient {
         if (body.device.state === "connected") {
           for (const [sessionId, agentId] of this.active) {
             if (agentId === body.device.id) void this.reattach(agentId, sessionId);
+          }
+          for (const [runId, agentId] of this.activeRuns) {
+            if (agentId === body.device.id) void this.resubscribeRun(agentId, runId);
           }
         }
         break;
@@ -518,6 +662,14 @@ export class HubClient {
         return;
       }
       /* the agent may not be ready yet; a later device.state will retry */
+    }
+  }
+
+  private async resubscribeRun(agentId: string, runId: string): Promise<void> {
+    try {
+      await this.subscribeRun(agentId, runId);
+    } catch {
+      /* the provider process may still be restarting; a later device.state retries */
     }
   }
 

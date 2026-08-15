@@ -39,6 +39,9 @@ importers:
       '@glass/sessiond':
         specifier: workspace:*
         version: link:../sessiond
+      '@glass/supervisor':
+        specifier: workspace:*
+        version: link:../supervisor
 
   packages/cli:
     dependencies:

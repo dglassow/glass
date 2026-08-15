@@ -43,6 +43,7 @@ import {
   type IMessageSend,
   type IMessageWatch,
   type IMessageUnwatch,
+  type ProviderRecord,
 } from "@glass/protocol";
 import { ProxyExit, ProxyForwarder } from "./proxy/index.js";
 import type { IMessageBridge } from "./imessage/index.js";
@@ -58,6 +59,7 @@ export interface HubLinkOptions {
   readonly deviceName: string;
   /** Etch presence, reported in the device record (detected, never managed). */
   readonly etch?: { present: boolean; version?: string };
+  readonly providers?: ProviderRecord[];
   /** iMessage bridge, when this Mac can serve one (detected, never assumed). */
   readonly imessage?: IMessageBridge;
   /** Signs the hub's auth challenge. Omit only when the hub runs in --open mode. */
@@ -107,6 +109,7 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
   // --- translation tables (soft state) ---
   const pending = new Map<string, string>(); // request id -> viewer address
   const attached = new Map<string, Set<string>>(); // sessionId -> viewers
+  const runAttached = new Map<string, Set<string>>(); // runId -> viewers
 
   // --- browser proxy (plan §7) ---
   // Exits are per REQUESTING peer, so replies are bound to the device that
@@ -235,6 +238,14 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
     }
     set.add(viewer);
   }
+  function addRunAttach(runId: string, viewer: string): void {
+    let set = runAttached.get(runId);
+    if (!set) {
+      set = new Set();
+      runAttached.set(runId, set);
+    }
+    set.add(viewer);
+  }
 
   // sessiond -> agent -> hub
   sd.on("data", (buf: Buffer) => {
@@ -277,6 +288,47 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
         // Fleet-wide fan-out (like session.created): every sidebar shows the
         // record's title, so every viewer must hear about the new name.
         toHub(HUB, body);
+        break;
+      }
+      case "run.created":
+      case "run.snapshot": {
+        const viewer = env.replyTo ? pending.get(env.replyTo) : undefined;
+        if (env.replyTo) pending.delete(env.replyTo);
+        const run = body.run;
+        if (viewer) {
+          addRunAttach(run.id, viewer);
+          toHub(viewer, body, env.replyTo);
+        }
+        if (body.type === "run.created") toHub(HUB, body);
+        break;
+      }
+      case "run.listed":
+      case "run.queried":
+      case "run.file-attached": {
+        const viewer = env.replyTo ? pending.get(env.replyTo) : undefined;
+        if (env.replyTo) pending.delete(env.replyTo);
+        if (viewer) toHub(viewer, body, env.replyTo);
+        break;
+      }
+      case "run.inventory.snapshot":
+        // This is the daemon's authoritative content-free process inventory,
+        // requested after every Hub registration. It goes only to the Hub so
+        // durable cards can be reconciled after a daemon restart.
+        console.error(`agent: forwarding sessiond inventory ${body.instanceId} (${body.runs.length} runs)`);
+        toHub(HUB, body);
+        break;
+      case "run.updated": {
+        const set = runAttached.get(body.run.id);
+        if (set) for (const viewer of set) toHub(viewer, body);
+        toHub(HUB, body);
+        break;
+      }
+      case "run.event": {
+        const set = runAttached.get(body.event.runId);
+        if (set) for (const viewer of set) toHub(viewer, body);
+        // Provider output, prompts, approvals, and tool payloads are private to
+        // viewers that explicitly subscribed to this run. The Hub owns only
+        // durable metadata and must never receive the transcript stream.
         break;
       }
       case "session.output": {
@@ -337,6 +389,27 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
       case "session.input":
       case "session.resize":
       case "session.close":
+        toSessiond(env.id, body);
+        break;
+      case "run.create":
+      case "run.list": {
+        pending.set(env.id, viewer);
+        toSessiond(env.id, body.type === "run.create" ? { ...body, deviceId: DeviceId.parse(self) } : body);
+        break;
+      }
+      case "run.subscribe":
+        pending.set(env.id, viewer);
+        addRunAttach(body.runId, viewer);
+        toSessiond(env.id, body);
+        break;
+      case "run.submit":
+      case "run.respond":
+      case "run.control":
+        toSessiond(env.id, body);
+        break;
+      case "run.query":
+      case "run.attach":
+        pending.set(env.id, viewer);
         toSessiond(env.id, body);
         break;
       case "proxy.forward.open": {
@@ -438,6 +511,7 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
         protocolVersion: PROTOCOL_VERSION,
         appVersion: APP_VERSION,
         etch: opts.etch ?? { present: false },
+        ...(opts.providers ? { providers: opts.providers } : {}),
         imessage: { present: !!opts.imessage, ...(opts.imessage?.account !== undefined ? { account: opts.imessage.account } : {}) },
         ...(opts.hubKey ? { clientNonce, channelBinding: true } : {}),
       };
@@ -478,6 +552,7 @@ export async function startHubLink(opts: HubLinkOptions): Promise<RunningHubLink
           reconnectDelay = RECONNECT_MIN_MS;
           if (env.body.compatibility === "ok") {
             console.error(`agent: registered with hub as ${self}`);
+            toSessiond(randomUUID(), { type: "run.inventory" });
             if (opts.onRegistered) opts.onRegistered();
           }
         }

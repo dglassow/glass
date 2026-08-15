@@ -28,6 +28,7 @@ import { loadOrCreateHubSigner } from "./hub-key.js";
 import { TunnelKeeper } from "./tunnel.js";
 import { Updater, requestSwap } from "./updater/index.js";
 import { GitStore } from "./git/git-store.js";
+import { RunStore } from "./run-store.js";
 
 function flag(argv: string[], name: string): string | undefined {
   const i = argv.indexOf(name);
@@ -316,9 +317,10 @@ async function runServer(argv: string[]): Promise<void> {
   // The TLS/git/PWA/updates endpoint rides the primary listener, unless --tls-listen
   // moved it to a dedicated second (TLS) listener alongside a plaintext primary.
   const endpointConfig = { ...tlsConfig, ...gitConfig, ...webConfig, ...updatesConfig };
+  const runStoreConfig = { runStore: new RunStore(flag(argv, "--run-store")) };
   const hub = await startHubServer(
     open
-      ? { host, port, mode: "open" }
+      ? { host, port, mode: "open", ...runStoreConfig }
       : {
           host,
           port,
@@ -328,6 +330,7 @@ async function runServer(argv: string[]): Promise<void> {
           ...credentialConfig,
           ...vaultConfig,
           ...hubSignerConfig,
+          ...runStoreConfig,
           ...(tlsListen
             ? { listeners: [{ host: tlsHost, port: tlsPort, ...endpointConfig }] }
             : endpointConfig),

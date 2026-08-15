@@ -1,6 +1,6 @@
 # Glass — open questions
 
-Everything settled lives in `glass-plan.md`. This file is only what's still undecided.
+Everything settled lives in `plan.md`. This file is only what's still undecided.
 
 **Ordered by when it blocks you.** Each has my recommendation where I have one, so most can be answered with a yes or a swap.
 
@@ -16,7 +16,7 @@ Types: **Decide** = needs your call · **Find out** = needs a spike first · **D
 |---|---|---|---|
 | ~~Q1~~ | ~~Do~~ | ~~App Store Connect API key for notarization~~ | **resolved ✓** |
 | ~~Q2~~ | ~~Find out~~ | ~~Does `@simplewebauthn/server` fit the passkey flow?~~ | **resolved ✓** |
-| **Q3** | Find out | Does Etch have a programmatic mode with structured output? | deferred |
+| ~~Q3~~ | ~~Find out~~ | ~~Does Etch have a programmatic mode with structured output?~~ | **resolved ✓** |
 | **Q4** | Find out | whisper.cpp or faster-whisper, on which Mac? | spike |
 | **Q5** | Find out | Message format for streaming text + audio | design later |
 | **Q6** | Later | Order of the deferred Mac capabilities | automation last |
@@ -46,22 +46,19 @@ capability. Proven by `tests/p2m2-passkey.mjs`. Browser-side wiring
 ## Phase 5 — Chat and voice
 
 ### Q3 — Does Etch have a programmatic mode with structured output?
-**Resolved (Phase 5 M1).** Three modes exist: (1) `etch -z "prompt"` one-shot
-prints ONLY the final assistant text (usable now, not JSON); (2) `tui_gateway`
-newline-delimited JSON-RPC over stdio (structured, but a full UI-backend
-protocol); (3) `etch acp` (structured, but editor/agent-client oriented). The
-chat provider uses mode 1 now — subprocess per message, render the text. The
-structured JSON-RPC/ACP integration (session ids, tool calls, cost, streaming)
-is a later enhancement if the chat surface needs those fields.
+**Resolved ✓ (Phase 9 review).** Etch has three usable surfaces: (1) `etch -z`
+one-shot final text, which is the current compatibility baseline; (2) the
+versioned `etch-surface-v1` JSON-RPC gateway over stdio/WebSocket, which is the
+chosen Glass integration; and (3) ACP, which remains available for editor and
+generic agent-client integrations but is not Glass's primary path.
 
-Original note follows for context:
-
-Interactive Etch needs nothing from Glass; it's a program in a PTY. But the PWA chat has to invoke Etch, get something parseable back, and render it conversationally.
-
-- **If Etch has a non-interactive mode** emitting JSON or similar — the chat surface is straightforward subprocess invocation.
-- **If Etch is purely a TUI** — cursor positioning, ANSI redraws — Glass would be scraping a terminal UI, which is fragile, and the fix lands in Etch rather than Glass.
-
-Worth knowing before Phase 5 planning gets specific, since the second case is a meaningfully larger job.
+Etch now ships the supported `etch surface --stdio` launcher. The versioned
+surface covers session create/resume/activate/close, streaming, approvals,
+clarification, session information, commands, file attachment, active sessions,
+delegation events/control, orchestration status, usage, and worktree metadata.
+Glass negotiates these optional capabilities and never launches internal Python
+modules or binds to private gateway names. Older Etch versions remain supported
+through a visibly reduced `etch -z` adapter. See plan §6 and Phase 9.
 
 ---
 
@@ -73,7 +70,10 @@ Note the input constraint: iPhone audio arrives from WebKit, so whatever format 
 ---
 
 ### Q5 — Message format for streaming text and audio
-**Find out.** The wire format carrying text deltas and audio between the PWA and Hub. Shape depends on Q3 — structured Etch output makes this much simpler. Not worth specifying in the abstract.
+**Find out.** Provider text deltas and input requests now normalize through the
+Phase 9 adapter contract. The remaining design question is the audio envelope
+between WebKit, the Hub, and the selected STT/TTS worker. Specify it after the
+Q4 hardware/codec spike rather than in the abstract.
 
 ---
 

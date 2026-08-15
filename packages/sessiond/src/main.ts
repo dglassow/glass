@@ -35,7 +35,7 @@ function main(): void {
   mkdirSync(dirname(socket), { recursive: true, mode: 0o700 });
   rmSync(socket, { force: true }); // clear a stale socket from a prior crash
 
-  const sd = createSessiondServer();
+  const sd = createSessiondServer({ statusDir: `${dirname(socket)}/agent-status` });
   sd.server.on("error", (err) => {
     console.error("sessiond: server error:", err);
     process.exit(1);

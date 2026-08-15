@@ -12,7 +12,7 @@ Glass is a **ground-up rebuild**, not an evolution of existing projects. It cons
 |---|---|
 | Prism (terminal broker) | **Replaced.** No architecture carried forward. Still useful as reference — it proved the PTY-over-WebSocket pattern works. |
 | Forge (git + secrets) | **Deprecated eventually, not migrated.** Glass starts clean — no importer. The two coexist; you re-add repos and secrets to Glass as you need them, and retire Forge once what's left on it stops mattering. Migration tooling stays possible later if the manual path proves annoying. |
-| Etch (terminal app) | **Stays separate, and manually managed.** A CLI you install and update yourself on each Agent — Glass does not distribute it. Two invocation modes: interactive inside a PTY (zero integration), and programmatic as a subprocess for AI-enabled actions. |
+| Etch (agent runtime) | **Primary agent, but still separate and manually managed.** You install and update it on each Agent; Glass never distributes it. Glass supports its full interactive CLI in a PTY, uses the versioned Etch surface protocol for structured runs, and retains `etch -z` only as a compatibility fallback. Etch remains authoritative for its runtime, context, delegation, autonomy, skills, and worktrees. |
 
 Phase 1 is therefore greenfield. More work up front than refactoring Prism would have been, but it avoids inheriting single-Mac assumptions.
 
@@ -24,10 +24,16 @@ A **session** is anything long-lived running on an Agent, streamed to a Viewer. 
 
 | Provider | Backed by | Notes |
 |---|---|---|
-| Terminal | `node-pty` | Same lib as VS Code's terminal. Built fresh — see §0. Running Etch inside one requires no special handling; it's a program like any other. |
-| Chat | Etch, invoked as a subprocess | Glass runs Etch non-interactively per message and renders the result conversationally. No service, no API, no callback. |
+| Terminal | `node-pty` | Same lib as VS Code's terminal. Built fresh; see §0. Etch, Codex, Claude, and any other CLI run here at full terminal fidelity. |
+| Chat | Provider adapter; Etch by default | A long-lived structured adapter streams turns, approvals, clarification, and lifecycle into Glass. Etch's surface protocol is the primary implementation; Codex and Claude implement the same Glass-side contract. |
 
 New capability = new provider. Nothing around it changes.
+
+An **agent run** is durable control-plane metadata layered over a `pty` or
+`chat` session, not a third session kind. It records where and how the agent is
+running, which provider session it corresponds to, its parent/children, and
+whether it needs attention. Provider-owned conversation history, memory, tool
+state, and policy do not move into Glass.
 
 **Browser is not a session provider.** See §7.
 
@@ -49,7 +55,9 @@ New capability = new provider. Nothing around it changes.
 
 The desktop app is a **real Mac application**, not an installed PWA — it has to spawn local Chromium with proxy flags, manage launchd, and reach Keychain, none of which a PWA can do.
 
-The PWA is strictly a chat interface — claude.ai-shaped. It runs terminal commands *through* the chat provider, which interprets and returns results as conversation. It is not a terminal emulator.
+The PWA is strictly a chat interface, claude.ai-shaped. It drives the selected
+agent through its chat adapter (Etch by default), which interprets terminal
+work and returns it as conversation. It is not a terminal emulator.
 
 **WebKit is a first-class target, not a fallback.** Every browser on iOS uses WebKit, including installed PWAs — so iPhone support means Safari-engine support. Audio capture, Web Push, and storage behavior must all work there from the start.
 
@@ -61,11 +69,22 @@ The PWA is strictly a chat interface — claude.ai-shaped. It runs terminal comm
 
 | Tier | Contains | Update cadence |
 |---|---|---|
-| Supervisor | Lifecycle only | Almost never |
-| Worker | Protocol, routing, UI serving, vault | Frequently, blue/green |
-| Session daemon | Live PTY file descriptors | Rarely |
+| Controller + supervisor | Per-user `glassd`, role/process lifecycle only | Almost never |
+| Hub | Registry, auth, routing, vault, UI serving | Per release; brief reconnect |
+| Worker | Agent protocol/routing and reconstructible soft state | Frequently, blue/green |
+| Session daemon | Live PTY file descriptors and scrollback | Only idle/reboot today |
 
-Sessions do not live in the tier that gets updated. Most updates swap the worker while shells run untouched. When the daemon itself must change, live fds pass between processes over a Unix socket (`SCM_RIGHTS`) — the nginx graceful-reload technique. Non-fd state (scrollback, in-flight agent tasks) serializes to disk and rehydrates.
+Sessions do not live in the tier that gets updated. A per-user LaunchAgent owns
+`glassd` outside the Tauri lifecycle; Glass.app is only a Viewer/control client.
+Bundled releases are copied to versioned writable runtimes before activation.
+Agent swaps blue/green, Hub restarts on a stable loopback port, and the running
+`sessiond` remains pinned to its old runtime while sessions exist. Today it
+advances after explicit reconfiguration or reboot. Live fd inheritance between
+old/new daemons remains the final no-interruption daemon-update step.
+Stable controller and portable-Node changes stage beside the installed service
+until the owner explicitly accepts a destructive restart. The replacement must
+report the expected controller identity and configured stack or the control
+client restores and restarts the previous service files.
 
 ---
 
@@ -73,6 +92,8 @@ Sessions do not live in the tier that gets updated. Most updates swap the worker
 
 - Self-updating, in place, no user interruption. Background by default.
 - Blue/green worker swap; old worker drains, new worker accepts.
+- App update/relaunch never owns or terminates the persistent backend.
+- Runtime activation swaps Agent, restarts Hub separately, and defers sessiond.
 - Anything genuinely requiring a restart first persists all in-progress work, then restores it after.
 - **Hub updates first, then pushes to spokes.** All devices converge on the Hub's version.
 - **The Hub must always speak protocol N-1.** This bounds compatibility work and lets a spoke that was offline during a rollout reconnect on its old version long enough to pull the update.
@@ -85,7 +106,8 @@ Sessions do not live in the tier that gets updated. Most updates swap the worker
 - **Validation before retirement:** the new worker must pass a health check before the old one is retired — never the reverse. Threshold TBD.
 - **Version skew is visible at both ends:** a spoke on N-1 shows a local banner *and* surfaces at the Hub, so drift gets addressed rather than accumulating.
 - **Etch is outside the update system entirely** — installed and updated by hand per machine, versioning independently of Glass. Expect drift between Macs.
-- **Glass detects Etch rather than managing it.** Each Agent reports whether Etch is present and at what version, surfaced in the device list. Removes the silent-failure mode without Glass taking ownership of a dependency it doesn't control.
+- **Glass detects Etch rather than managing it.** Each Agent reports whether Etch is present, its version, and the structured capabilities it advertises. Glass may invoke the installed binary, but never installs, updates, configures, or bundles it. Version/capability drift is visible instead of becoming a silent failure.
+- **Release candidates are provenance-bound.** The backend records source commit, release version, dirty state, and runtime digest. Packaging requires a clean tag at HEAD; ARM64 macOS CI builds the real unsigned app and verifies its bundled runtime. Shipping also runs real Etch, Codex, and Claude concurrently before signing.
 - **Two independent restore artifacts:** code from the public GitHub repo, state from a backup snapshot. Full recovery is an anonymous clone followed by a state restore — neither artifact depends on the Hub being alive, and neither requires credentials you might have lost with it.
 
 ---
@@ -120,6 +142,107 @@ glass/
 ## 6. UI shape
 
 Session list (sidebar) + tiling pane area. Type badges, device labels, live status. Sessions detach and reattach across panes and Viewers without dying. PWA collapses to a single chat surface.
+
+### Agent orchestration
+
+Glass is the durable **control and attention plane** for agents; it is not a
+second agent runtime. The provider boundary is deliberately narrow:
+
+| Glass owns | The provider owns |
+|---|---|
+| Device and workspace placement, launch profiles, session routing, layout, normalized run state, attention/approval routing, safe notifications, and capability display | Prompts and transcripts, model/tool schemas, permissions, skills, memory/context, compaction/resume semantics, cron/autonomy, delegation, and execution policy |
+
+The Hub persists and broadcasts run/workspace metadata; `sessiond` owns live
+provider processes and handles; Agent translates and routes; Viewers are
+replaceable projections. Provider-specific wire types stay inside the
+sessiond adapter and are generated from each provider's public contract. Only
+the normalized `run.*` messages belong in Glass `protocol/`.
+
+After each Agent registration, sessiond sends its UUID-tagged, content-free run
+inventory to the Hub. The Hub reconciles durable records for that device and
+marks missing nonterminal runs interrupted. This prevents stale Active and
+Needs you cards after a daemon restart without moving provider content into the
+Hub. If a provider session id survived, Viewer can create a replacement run
+through the provider's native resume path.
+
+Etch is the default for **New agent** and the reference adapter. A top-level
+Etch run starts in the chosen cwd/profile and is isolated from sibling runs.
+`sessiond` owns the adapter process so Viewer, Hub, and Agent reconnects do not
+terminate it. Glass creates the Etch session with `close_on_disconnect=false`,
+persists both Etch's runtime and stored session ids as opaque references, and
+uses Etch's own resume path after a provider restart. Glass never writes Etch
+configuration or copies Lattice/Silica state into the Hub.
+
+The Etch adapter targets the checked-in `etch-surface-v1` JSON-RPC contract:
+
+- Negotiate `gateway.ready` and its contract/capabilities before enabling UI.
+- Map `session.create`, `session.resume`, `session.activate`, and
+  `session.close` onto the existing Glass `chat` session lifecycle.
+- Stream `prompt.submit` plus `message.*`; route `approval.request` and
+  `clarify.request` to the exact run that emitted them.
+- Surface `session.info`, command catalog, model/provider/profile selection,
+  reasoning effort, and file attachment only when advertised.
+- Treat unknown optional capabilities additively and fail closed on an
+  incompatible major contract.
+
+Etch now exposes the supported `etch surface --stdio` entry point, with stdout
+reserved for protocol frames and diagnostics on stderr. Glass launches one
+surface process per top-level Etch run for failure isolation. The v1.2 contract
+advertises optional active-session, delegation control/events, orchestration
+status, usage, and worktree metadata; Glass gates each UI action on the
+negotiated capability and does not bind to private gateway names. Etch performs
+autonomy and worktree operations while Glass requests and reflects bounded
+metadata. Canonical Etch semantics remain in the Etch
+repository's `modules/etch/module.json`, `docs/etch/glass-module.md`,
+`docs/etch/session-lifecycle.md`, `docs/etch/central-context-awareness.md`, and
+`docs/etch/runtime-autonomy.md`; this plan defines only the Glass-side boundary.
+
+Each durable run record contains only bounded control metadata: Glass run id,
+device/session id, provider and opaque provider-session id, cwd/workspace,
+optional Etch profile/model, parent run id, worktree reference, normalized
+status/attention reason, capability set, aggregate usage/cost when reported,
+and last activity time. It contains no prompt, response, command, tool output,
+secret, or Lattice content. The workspace stores pane layout, hidden/visible
+state, and focus separately, so closing a window is never equivalent to
+killing a run.
+
+Concurrent Etch coding runs default to a provider-owned isolated worktree;
+shared mode is explicit. Etch creates and locks the worktree and its
+capacity/policy errors pass through unchanged. Glass records only the selected
+mode and returned reference and never runs competing cleanup or merge logic.
+Codex, Claude, and generic runs record their selected mode but do not claim
+Etch's worktree lifecycle; their provider/user remains responsible.
+
+Provider launch is an argv operation, never a shell command string. Cwd,
+profile, model, provider, status path, and attachments are validated before
+crossing the sessiond boundary; a remote Viewer cannot choose the executable
+path or inject arbitrary environment variables. Approval and clarification
+ids are scoped to both run and provider session so one busy agent cannot
+resolve another agent's pending request.
+
+The desktop and shared Viewer add an **Agent Board** above the existing panes: grouped by
+workspace/device, showing working, waiting, complete, failed, stale, and the
+specific input type required. It supports launch, focus, resume, interrupt,
+close, and approval/clarification from one inbox. Etch subagent events and
+controls appear when delegation capability is advertised. The PWA
+shows the same run/inbox model for chat sessions, without exposing a terminal.
+
+Provider adapters have unequal capabilities and the UI says so rather than
+emulating features unsafely:
+
+| Provider | Structured path | Initial Glass target |
+|---|---|---|
+| **Etch (default)** | Versioned `etch surface --stdio` | Full lifecycle/stream/input plus negotiated delegation, orchestration, usage, attachment, and Etch-owned worktrees; reduced `etch -z` fallback |
+| Codex | `codex app-server --stdio` | Persistent threads, streaming, approvals/input, usage, and interrupt; reduced resumable `codex exec --json` fallback |
+| Claude | Resumable streaming JSON CLI | Streaming/session resume and interrupt; capability-labeled limits for interactive-only behavior |
+| Generic CLI | Owner-configured argv plus content-safe terminal status | Launch, stream, status/attention, interrupt, and close only |
+
+Etch's existing schema-v2 terminal status contract is the seed for the generic
+fallback. Glass defines equivalent Glass-namespaced variables and supplies
+both sets during migration so today's Prism-compatible Etch implementation
+works unchanged. Status files remain per-session, owner-only, atomically
+written, lease-fenced, and content-free. Structured provider events take
+precedence when both exist.
 
 Right-click a session or device row to rename it inline. Session titles live in sessiond's record (`session.rename`, broadcast fleet-wide); device names persist in the hub's trust store (`device.rename`), which registration prefers over a device's self-reported hello name — so both survive reconnects and restarts.
 
@@ -205,11 +328,13 @@ Structured JSON lines. **Explicit secret redaction is mandatory** — `glass run
 
 ---
 
-## 12. Chat agent authority
+## 12. Agent authority
 
-Updates split by what they own: **Tauri's built-in updater** handles the desktop UI shell (a restart is free — sessions live in the daemon and you reattach), while the **supervisor** handles background services with the blue/green handoff.
+Updates split by what they own: **Tauri's built-in updater** replaces the desktop UI shell and bundled runtime; the next launch stages that runtime outside the `.app`. Persistent **glassd** activates it by asking the supervisor to blue/green Agent, restarting Hub separately, and retaining sessiond. A Viewer restart is free because it reconnects and reattaches.
 
-**Two layers of chat authority, both tunable by the Hub owner.**
+Provider permissions remain authoritative. Glass adds two narrower policy
+layers, both tunable by the Hub owner; it never silently upgrades a provider's
+permission mode.
 
 | Layer | Applies to | Behavior |
 |---|---|---|
@@ -252,11 +377,14 @@ Envelope encryption, secret CRUD, per-device allow-lists, tags, `glass run`, bac
 → **Done when:** no secrets remain in your dotfiles.
 
 ### Phase 4 — Self-update
-Blue/green worker swap, fd handoff, Hub→spoke distribution, N-1 compatibility, local git update source, skew banners at both ends.
+Persistent app-independent backend, blue/green worker swap, deferred sessiond replacement, Hub→spoke distribution, N-1 compatibility, local git update source, skew banners at both ends. Live fd handoff remains a later hardening step.
 → **Done when:** an update lands mid-session and you don't notice.
 
 ### Phase 5 — Chat & voice
-Chat provider over PTY, PWA chat surface, STT/TTS, push-to-talk, Web Push.
+Baseline one-shot chat provider, then the shared PWA agent surface, STT/TTS,
+push-to-talk, and Web Push. Phase 9 replaces the one-shot Etch path with its
+persistent structured adapter; voice consumes the same normalized stream and
+approval/clarification events.
 → **Done when:** you drive an agent by voice from your phone.
 
 ### Phase 6 — Browser proxy
@@ -271,7 +399,55 @@ Bare repo serving, per-spoke access, backup integration.
 Multi-listener Hub (loopback for the local viewer, TLS over the relay for spokes), fleet-wide session sync, self-serve number-match enrollment from the app, and desktop-app auto-update served by the Hub (minisign-signed, notarized, anti-rollback) with Hub→spoke skew banners.
 → **Done when:** a fresh Mac joins the fleet from the app alone, sees every device's sessions, and receives signed updates without anyone touching it.
 
-**Build status lives in `CLAUDE.md` (“Current state”), which is updated as milestones land. As of Aug 2026: Phases 0–4, 6–8 complete; Phase 5 has the chat provider but not voice or the PWA chat surface.**
+### Phase 9: Multi-agent control plane
+
+**M0: Etch integration contract (done).** In Etch, add a supported headless surface
+launcher with a clean stdio contract and capability/version reporting. Add
+Glass aliases to the content-safe terminal-status environment contract. Keep
+the Etch module, session-lifecycle, and surface-contract docs/tests canonical;
+do not make Glass import Etch internals.
+
+**M1: durable runs and attention (done).** Add the provider-neutral run record,
+workspace persistence, cwd-aware launch profiles, Agent Board, unified inbox,
+content-safe status-file ingestion, and additive `run.*` list/control/status
+messages with fleet-wide broadcasts. Prove many independent PTYs/runs across
+devices survive Viewer and Agent replacement without status or layout leaking
+between them.
+
+**M2: Etch primary adapter (done).** Replace `etch -z` as the default with a
+sessiond-owned Etch surface process. Negotiate the contract; implement
+create/resume/activate/close, streaming, session info, model/provider/profile
+selection, reasoning effort, command catalog, attachments, approvals, and
+clarification. Preserve `-z` only for old Etch versions and label the reduced
+capability explicitly.
+
+**M3: Etch-native orchestration (done).** Add versioned optional Etch surface
+capabilities for active sessions, subagent events/control, child-session
+watching, scheduled/autonomous-run status, usage/cost, and worktree references.
+Render them in Glass without copying transcripts, Lattice state, schedules, or
+worktree policy. Etch remains the executor and source of truth.
+
+**M4: Codex and Claude adapters (done).** Map Codex app-server and Claude's
+structured/resumable CLI surfaces to the same run contract, with per-provider
+capability negotiation and explicit reduced behavior. Run mixed-provider
+concurrency, restart/reattach, approval-isolation, status-fencing, Etch
+worktree-lock, privacy, and failure-injection harnesses across the two repos.
+
+→ **Done when:** Etch is the default and exposes its native resume, input,
+delegation, autonomy, and worktree capabilities through Glass; Etch, Codex, and
+Claude can run concurrently across devices; every waiting agent is visible;
+and a Viewer/Agent restart loses neither in-flight provider processes nor the
+workspace used to supervise them.
+
+**Shipped August 2026.** Etch M0–M3 landed in the Etch repository and the Glass
+M1–M4 control plane is covered by `tests/p9m1-agent-runs.mjs` and
+`tests/p9m2-mixed-providers.mjs`. The release-machine smoke in
+`tests/provider-live-smoke.mjs` additionally drives installed Etch, Codex, and
+Claude concurrently across an Agent replacement. Phase 5 voice and its focused
+mobile chat UX remain separate work on this normalized streaming/input
+contract.
+
+**Build status lives in `CLAUDE.md` (“Current state”), which is updated as milestones land. As of Aug 2026: Phases 0–4 and 6–9 complete; Phase 5 still lacks voice and the focused PWA chat surface.**
 
 ---
 

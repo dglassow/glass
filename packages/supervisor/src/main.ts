@@ -17,6 +17,7 @@ function parseArgs(argv: string[]): {
   workerEntry: string;
   workerArgs: string[];
   healthTimeoutMs?: number;
+  allowUnregisteredStart?: boolean;
 } {
   const dd = argv.indexOf("--");
   const before = dd < 0 ? argv : argv.slice(0, dd);
@@ -32,7 +33,14 @@ function parseArgs(argv: string[]): {
   if (!runDir || !sessiondEntry || !workerEntry) {
     throw new Error("usage: supervisor --run-dir <dir> --sessiond-entry <path> --worker-entry <path> -- <worker args>");
   }
-  return { runDir, sessiondEntry, workerEntry, workerArgs, ...(health !== undefined ? { healthTimeoutMs: Number(health) } : {}) };
+  return {
+    runDir,
+    sessiondEntry,
+    workerEntry,
+    workerArgs,
+    ...(health !== undefined ? { healthTimeoutMs: Number(health) } : {}),
+    ...(before.includes("--allow-unregistered-start") ? { allowUnregisteredStart: true } : {}),
+  };
 }
 
 async function main(): Promise<void> {

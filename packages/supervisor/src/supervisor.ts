@@ -20,6 +20,9 @@ export interface SupervisorOptions {
   workerEntry: string;
   workerArgs: string[];
   healthTimeoutMs?: number;
+  /** Initial/recovery start may accept a live sessiond link before Hub trust is
+   * granted. Blue/green swaps always require full authenticated READY. */
+  allowUnregisteredStart?: boolean;
 }
 
 export class Supervisor {
@@ -51,7 +54,7 @@ export class Supervisor {
     const worker = this.spawn(this.desiredWorkerEntry);
     this.adoptWorker(worker);
     try {
-      await worker.waitReady(this.healthTimeoutMs);
+      await worker.waitReady(this.healthTimeoutMs, this.opts.allowUnregisteredStart);
       if (!worker.running) throw new Error(`worker gen${worker.generation} exited after reporting ready`);
       this.started = true;
       this.writeCurrent(this.desiredWorkerEntry);
@@ -114,7 +117,7 @@ export class Supervisor {
 
   status(): Record<string, unknown> {
     return {
-      sessiond: { pid: this.sessiond?.pid ?? null, socket: this.sessiondSocket },
+      sessiond: { pid: this.sessiond?.pid ?? null, socket: this.sessiondSocket, entry: this.opts.sessiondEntry },
       worker: { pid: this.worker?.pid ?? null, entry: this.worker?.entry ?? null, generation: this.worker?.generation ?? 0 },
       recovery: {
         active: this.recovery !== null,
@@ -224,7 +227,7 @@ export class Supervisor {
           const worker = this.spawn(this.desiredWorkerEntry);
           this.adoptWorker(worker);
           try {
-            await worker.waitReady(this.healthTimeoutMs);
+            await worker.waitReady(this.healthTimeoutMs, this.opts.allowUnregisteredStart);
             if (!worker.running) throw new Error(`worker gen${worker.generation} exited after reporting ready`);
           } catch (err) {
             if (this.worker === worker) this.worker = null;

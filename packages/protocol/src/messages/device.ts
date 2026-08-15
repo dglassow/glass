@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { DeviceId } from "../ids.js";
+import { ProviderRecord } from "./run.js";
 
 export const DeviceRole = z.enum(["hub", "agent", "viewer"]);
 export type DeviceRole = z.infer<typeof DeviceRole>;
@@ -15,6 +16,10 @@ export const DeviceRecord = z.object({
   lastSeen: z.number().int().nonnegative(),
   appVersion: z.string().optional(),
   etchPresent: z.boolean().optional(),
+  /** Structured agent runtimes detected on this device. */
+  providers: z.array(ProviderRecord).optional(),
+  /** Current PTY/provider daemon lifetime, populated by authoritative inventory. */
+  sessiondInstanceId: z.string().uuid().optional(),
   /** The device can serve the iMessage bridge (detected, never assumed). */
   imessagePresent: z.boolean().optional(),
   /** The bridge's signed-in account, when detectable. Same account on two

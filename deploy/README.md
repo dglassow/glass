@@ -1,15 +1,30 @@
 # Deploy
 
-Three scripts, three jobs. All key material they generate lands in gitignored
+The desktop service path plus the relay tools live here. All key material lands in gitignored
 `config/local/`; nothing secret is committed. The relay's public address is
 instance config — it appears here as `<relay>`; the deployed value lives in the
 scripts' `RELAY_IP` constant and the hub's instance config.
 
-## `glass-backend.mjs` — the per-role backend the app runs
+## `glass-backend.mjs` + `glassd.mjs`: persistent desktop backend
 
-The desktop app spawns this with `--role standalone|hub|spoke`; it brings up
-and supervises the right processes, prints one `GLASS_BACKEND_READY <json>`
-line, then stays up (reaping children on SIGTERM):
+The desktop app invokes `glass-backend.mjs --role standalone|hub|spoke` as a
+short-lived control client. It installs a per-user LaunchAgent on first use,
+asks persistent `glassd.mjs` to ensure the role, prints one
+`GLASS_BACKEND_READY <json>` line, and exits. Closing or replacing Glass.app
+therefore cannot signal the PTY-owning `sessiond`.
+
+`glassd` owns Hub/tunnel plus the protocol-free supervisor:
+
+```text
+launchd
+  └─ glassd
+       ├─ Hub + reverse tunnel
+       └─ supervisor
+            ├─ sessiond  (PTY owner; retained across app/runtime updates)
+            └─ Agent     (blue/green)
+```
+
+Role behavior remains:
 
 - **standalone** — local OPEN ws hub + sessiond + agent, all loopback, no
   auth/TLS (so the webview connects over `ws://` with no cert problem).
@@ -19,9 +34,32 @@ line, then stays up (reaping children on SIGTERM):
   multi-listener).
 - **spoke** — sessiond + agent joining a remote hub (`HUB_URL`/`HUB_PIN`).
 
-It resolves service entry points from the dev repo when run there, or from the
-bundled layout inside Glass.app, and writes state to `~/.glass` (never inside
-the read-only .app).
+For distributed apps, the client atomically copies each bundled release into
+`~/.glass/runtimes/<version-and-digest>/`; live processes never execute from the
+replaceable `.app`. A new runtime blue/green-swaps Agent, restarts Hub on its
+stable loopback port, and leaves the existing `sessiond` pinned. Old runtimes
+are retained while processes may still use them. `sessiond` advances after an
+explicit stop/reconfiguration or reboot until live fd handoff is implemented.
+
+`--stop` is intentionally destructive and is used only by Reconfigure. Normal
+window close, Quit, updater relaunch, and a repeated `--role` call attach to the
+running service. `--status` reports controller identity, supervisor state,
+the active and desired sessiond runtimes, and any staged service update.
+
+Bundled changes to the stable controller or portable Node binary are staged as
+pending service files and never overwrite a running service in place.
+The Agent Board Doctor panel exposes that pending state.
+Applying it requires an explicit confirmation because launchd must restart the
+backend and live sessiond processes will be interrupted.
+The control client verifies the new controller identity and configured stack;
+if the replacement does not become healthy, it restores the prior controller
+and Node binary and restarts the previous service.
+
+The Hub persists Agent Board run/workspace metadata at
+`~/.glass/<role>/runs.json` (owner-only and atomically replaced). This file
+contains routing, capability, state, usage, and layout metadata only. Provider
+prompts, output, approvals, tools, and transcripts remain in the provider and
+are never written by the Hub.
 
 ## `relay-smoke.mjs` — prove the live relay end-to-end
 

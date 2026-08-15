@@ -25,6 +25,7 @@
  */
 import { HubClient, type EnrollConfig } from "./hub-client.js";
 import { Workspace, SESSION_MIME } from "./workspace.js";
+import { AgentBoard } from "./agent-board.js";
 import { loadOrCreateIdentity, loadHubConfig, saveHubConfig, type DeviceIdentity, type HubConfig } from "./auth.js";
 import { showOnboarding, type Role } from "./onboarding.js";
 import { isNative, startBackend, stopBackend, onReconfigure, onSettings, checkForUpdates, appVersion, launchProxiedBrowser, type BackendInfo } from "./native.js";
@@ -226,7 +227,8 @@ async function runRole(app: HTMLElement, identity: DeviceIdentity, role: Role, s
   }
 }
 
-/** File menu / gear: stop the backend, forget the role, re-run onboarding. */
+/** File menu / gear: explicitly stop the persistent backend, forget the role,
+ * and re-run onboarding. This is the user-selected destructive session boundary. */
 async function reconfigure(app: HTMLElement, identity: DeviceIdentity): Promise<void> {
   currentClient?.close();
   currentClient = null;
@@ -590,6 +592,7 @@ function startApp(
   }
 
   let workspace: Workspace;
+  let agentBoard: AgentBoard;
   let latestDevices: DeviceRecord[] = [];
   let didAutoOpen = false;
   // Sessions that exist on agents but this viewer has NOT attached — discovered
@@ -606,6 +609,7 @@ function startApp(
         statusText.textContent = `connected as ${identity.deviceId}`;
         status.dataset["state"] = "connected";
         void refreshDevices();
+        void refreshRuns();
       },
       onDisconnected: () => {
         statusText.textContent = "reconnecting…";
@@ -642,6 +646,12 @@ function startApp(
         if (r) r.title = session.title;
         renderSidebar();
       },
+      onRunAppeared: (run) => {
+        agentBoard.upsert(run);
+      },
+      onRunUpdated: (run) => agentBoard.upsert(run),
+      onRunEvent: (event) => agentBoard.append(event),
+      onWorkspaces: (workspaces) => agentBoard.restore(workspaces),
       onError: (code, message) => {
         statusText.textContent = `error: ${code} — ${message}`;
         if (code === "hub_identity") status.dataset["state"] = "error";
@@ -665,6 +675,19 @@ function startApp(
   currentClient = client;
 
   workspace = new Workspace(client, () => renderSidebar());
+  agentBoard = new AgentBoard(client);
+
+  const boardBtn = document.createElement("button");
+  boardBtn.className = "agent-board-toggle";
+  boardBtn.textContent = "Agent Board";
+  boardBtn.addEventListener("click", () => {
+    const show = !agentBoard.visible;
+    agentBoard.show(show);
+    workspace.el.hidden = show;
+    boardBtn.dataset["active"] = String(show);
+    app.classList.remove("drawer-open");
+  });
+  sidebar.insertBefore(boardBtn, deviceList);
 
   // Mobile (<720px, style.css): the sidebar becomes a slide-out drawer. The
   // hamburger + backdrop are display:none on desktop and position:fixed, so
@@ -781,7 +804,7 @@ function startApp(
   });
   extHost.sync(loadExtensions());
 
-  app.append(sidebar, workspace.el, msgPanel.el, ribbon.el, menuBtn, backdrop, updateBanner);
+  app.append(sidebar, workspace.el, agentBoard.el, msgPanel.el, ribbon.el, menuBtn, backdrop, updateBanner);
 
   async function refreshDevices(): Promise<void> {
     try {
@@ -789,9 +812,20 @@ function startApp(
     } catch {
       return; /* not connected yet */
     }
+    agentBoard.setDevices(latestDevices);
     await refreshRemoteSessions();
     renderSidebar();
     maybeAutoOpen();
+  }
+
+  async function refreshRuns(): Promise<void> {
+    try {
+      const [runs, workspaces] = await Promise.all([client.listRuns(), client.listWorkspaces()]);
+      agentBoard.replaceRuns(runs);
+      agentBoard.restore(workspaces);
+    } catch {
+      /* Hub or provider may still be reconnecting; live broadcasts catch up. */
+    }
   }
 
   /** Pull each connected agent's session list into `remote` (minus ones we hold),

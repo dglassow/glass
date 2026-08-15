@@ -8,23 +8,11 @@
  * blue/green-swapped) by the supervisor; runnable by hand and for the tests.
  */
 import { writeSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { startAgent } from "./relay.js";
 import { startHubLink } from "./hub-link.js";
 import { loadOrCreateSigner } from "./keystore.js";
 import { detectIMessage, IMessageBridge } from "./imessage/index.js";
-
-/** Detect the Etch CLI (detected, never managed — plan §0). */
-function detectEtch(): { present: boolean; version?: string } {
-  try {
-    const r = spawnSync(process.env["GLASS_ETCH_BIN"] || "etch", ["--version"], { encoding: "utf8", timeout: 5000 });
-    if (r.error) return { present: false };
-    const line = (r.stdout || r.stderr || "").trim().split("\n")[0]?.trim();
-    return line ? { present: true, version: line } : { present: true };
-  } catch {
-    return { present: false };
-  }
-}
+import { detectProviders } from "./providers.js";
 
 /** Report supervised-worker status on fd 3 (a pipe the supervisor reads). Best-effort. */
 function statusLine(supervised: boolean, line: string): void {
@@ -115,12 +103,15 @@ async function main(): Promise<void> {
         imessage = undefined;
       }
     }
+    const providers = detectProviders();
+    const etch = providers.find((provider) => provider.id === "etch");
     const link = await startHubLink({
       sessiondPath: args.sessiond,
       hubUrl: args.hub,
       deviceId: args.deviceId,
       deviceName: args.name,
-      etch: detectEtch(),
+      etch: { present: etch?.installed === true, ...(etch?.version ? { version: etch.version } : {}) },
+      providers,
       ...(imessage ? { imessage } : {}),
       ...(signer ? { signer } : {}),
       ...(args.hubKey ? { hubKey: args.hubKey } : {}),
@@ -132,6 +123,13 @@ async function main(): Promise<void> {
         process.exit(0);
       },
     });
+    // The downstream sessiond connection is established before startHubLink()
+    // returns.  A brand-new spoke may not be trusted by the Hub yet, so expose
+    // this weaker readiness state to the supervisor: it can keep the worker
+    // alive for companion enrollment without pretending a blue/green candidate
+    // is healthy.  Swaps still require the stronger READY emitted above after
+    // the authenticated Hub handshake completes.
+    statusLine(args.supervised, "SESSIOND_READY");
 
     if (args.supervised) {
       // Newline commands from the supervisor on stdin (protocol-free).

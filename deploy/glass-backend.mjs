@@ -1,263 +1,501 @@
 /**
- * Unified local backend launcher for the desktop app. The Tauri shell spawns
- * this with a --role, and it brings up (and supervises) the right processes for
- * that role, printing exactly one line:
+ * Glass desktop backend client/bootstrap.
  *
- *     GLASS_BACKEND_READY <json>        e.g. {"role":"standalone","hubUrl":"ws://127.0.0.1:53411"}
+ * This process is intentionally short-lived.  It installs/starts the durable
+ * per-user glassd service, asks it to ensure the selected role, prints exactly
+ * one readiness line for Tauri, and exits.  Closing or replacing Glass.app can
+ * therefore never signal the PTY-owning sessiond.
  *
- * then stays running until killed (it tears its children down on SIGTERM/exit).
+ *   node glass-backend.mjs --role standalone|hub|spoke
+ *   node glass-backend.mjs --status
+ *   node glass-backend.mjs --stop
+ *   node glass-backend.mjs --apply-service-update
  *
- * Roles:
- *   standalone  local OPEN ws hub + sessiond + agent — everything on this Mac,
- *               no auth, no TLS. The app UI connects to hubUrl over loopback.
- *   hub         local TRUST ws hub (auto-trusts the app's viewer device from
- *               VIEWER_ID/VIEWER_PUB) + sessiond + agent; the app connects over
- *               ws loopback. If ~/.glass/hub.json (GLASS_HUB_CONFIG) supplies a
- *               real cert + relay + tunnel key, the hub ALSO runs a TLS wss://
- *               listener tunneled to the relay so remote spokes and the PWA can
- *               reach it at publicUrl; without it the hub stays loopback-only.
- *   spoke       sessiond + agent joining a REMOTE hub (HUB_URL[/HUB_PIN]); the
- *               app UI connects to HUB_URL (which must be reachable + trust this
- *               device). Reported hubUrl = HUB_URL.
- *
- * Env: GLASS_HOME (repo root; defaults to two levels up from this file),
- *      VIEWER_ID, VIEWER_PUB (the app's device identity, for hub mode),
- *      HUB_URL, HUB_PIN (spoke mode).
+ * Production bundles are copied to ~/.glass/runtimes/<version-or-digest>/
+ * before activation, so launchd and live processes never execute from the
+ * replaceable application bundle.  Dev checkouts run their built entries in
+ * place. GLASS_SERVICE_MODE=direct is the launchd-free acceptance-test path.
  */
-import { spawn, execFileSync } from "node:child_process";
-import { mkdirSync, existsSync, writeFileSync, readFileSync } from "node:fs";
-import { setTimeout as sleep } from "node:timers/promises";
-import { homedir, hostname } from "node:os";
-import { dirname, join } from "node:path";
+import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import {
+  chmodSync,
+  closeSync,
+  copyFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { connect as netConnect } from "node:net";
+import { setTimeout as sleep } from "node:timers/promises";
 
 const SELF_DIR = dirname(fileURLToPath(import.meta.url));
-const HOME = process.env.GLASS_HOME || join(SELF_DIR, "..");
+const REPO_ROOT = process.env.GLASS_HOME || resolve(SELF_DIR, "..");
+const SERVICE_DIR = process.env.GLASS_SERVICE_DIR || join(homedir(), ".glass", "service");
+const STATE_DIR = process.env.GLASS_STATE_DIR || join(homedir(), ".glass", "desktop");
+const CONTROL_PATH = join(SERVICE_DIR, "control.sock");
+const CONFIG_PATH = join(SERVICE_DIR, "config.json");
+const PLIST_PATH = process.env.GLASS_LAUNCH_AGENT_PATH || join(homedir(), "Library", "LaunchAgents", "com.glassow.glass.backend.plist");
+const LABEL = "com.glassow.glass.backend";
+const DIRECT = process.env.GLASS_SERVICE_MODE === "direct";
+const SERVICE_UPDATE_PATH = join(SERVICE_DIR, "update.json");
+const LAUNCHCTL = process.env.GLASS_LAUNCHCTL_BIN || "launchctl";
+const SERVICE_UPDATE_TIMEOUT_MS = Number(process.env.GLASS_SERVICE_UPDATE_TIMEOUT_MS || 30_000);
+const SERVICE_NODE_SOURCE = process.env.GLASS_SERVICE_NODE_SOURCE || process.execPath;
 
-// Resolve a service main for either the dev repo (packages/<pkg>/dist) or a
-// bundled deploy (node_modules/@glass/<pkg>/dist, next to this launcher).
-function resolveMain(pkg) {
-  const cands = [join(HOME, "packages", pkg, "dist", "main.js"), join(SELF_DIR, "node_modules", "@glass", pkg, "dist", "main.js")];
-  return cands.find((c) => existsSync(c)) ?? cands[0];
-}
-const HUB = resolveMain("hub");
-const SESSIOND = resolveMain("sessiond");
-const AGENT = resolveMain("agent");
-// State (device keys, trust store) must live somewhere writable — never inside a
-// read-only .app bundle.
-const DIR = process.env.GLASS_STATE_DIR || join(homedir(), ".glass", "desktop");
-
-const roleArg = (() => {
-  const i = process.argv.indexOf("--role");
-  return i >= 0 ? process.argv[i + 1] : "standalone";
-})();
-
-const b64u = (b) => Buffer.from(b).toString("base64url");
-// The exact node binary running this launcher — robust against a minimal PATH
-// (a GUI-launched desktop app), unlike a bare "node".
-const NODE = process.execPath;
-const procs = [];
-function spawnProc(name, args, readyRe, timeoutMs = 12000) {
-  const cp = spawn(NODE, args, { stdio: ["ignore", "pipe", "pipe"] });
-  procs.push({ name, cp });
-  let buf = "";
-  const ready = new Promise((resolve, reject) => {
-    const onData = (d) => {
-      buf += d.toString();
-      const m = buf.match(readyRe);
-      if (m) resolve({ m, buf });
-    };
-    cp.stdout.on("data", onData);
-    cp.stderr.on("data", onData);
-    cp.once("exit", (c) => reject(new Error(`${name} exited (${c}): ${buf.slice(-400)}`)));
-    setTimeout(() => reject(new Error(`${name} not ready in ${timeoutMs}ms: ${buf.slice(-400)}`)), timeoutMs);
-  });
-  return { cp, ready, out: () => buf };
-}
-async function genKeyIfMissing(deviceId, path) {
-  if (existsSync(path)) return JSON.parse(readFileSync(path, "utf8")).publicKey; // was execFileSync("cat")
-  const kp = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
-  const publicKey = b64u(new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey)));
-  const privateKeyPkcs8 = b64u(new Uint8Array(await crypto.subtle.exportKey("pkcs8", kp.privateKey)));
-  writeFileSync(path, JSON.stringify({ v: 1, deviceId, publicKey, privateKeyPkcs8 }), { mode: 0o600 });
-  return publicKey;
-}
-const trustAdd = (ts, id, pub, roles) => execFileSync(NODE, [HUB, "trust", "add", "--trust-store", ts, "--device-id", id, "--name", id, "--public-key", pub, "--roles", roles]);
-const ready = (obj) => console.log(`GLASS_BACKEND_READY ${JSON.stringify(obj)}`);
-const shutdown = () => {
-  for (const { cp } of procs.reverse()) try { cp.kill("SIGTERM"); } catch { /* gone */ }
-  process.exit(0);
+const argv = process.argv.slice(2);
+const has = (name) => argv.includes(name);
+const arg = (name, fallback) => {
+  const i = argv.indexOf(name);
+  return i >= 0 ? argv[i + 1] : fallback;
 };
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
 
-function hubPortFrom(buf) {
-  return Number(new URL(buf.match(/listening on (wss?:\/\/\S+)/)[1].replace(/^ws/, "http")).port);
-}
-// The port of the first listener whose scheme matches exactly ("ws" | "wss").
-function portFromScheme(buf, scheme) {
-  const re = new RegExp(`listening on (${scheme}://\\S+)`);
-  const m = buf.match(re);
-  return m ? Number(new URL(m[1].replace(/^wss?/, "http")).port) : null;
+function marker(name, payload) {
+  process.stdout.write(`${name}${payload === undefined ? "" : ` ${JSON.stringify(payload)}`}\n`);
 }
 
-// Optional local exposure config (never in the public repo — it holds the relay
-// IP, tunnel key path, cert paths, and public hostname). Present + valid =>
-// the hub also serves a TLS wss:// listener tunneled to the relay, so remote
-// spokes and the PWA can reach it. Absent/incomplete => loopback-only hub.
-function loadHubExposure() {
-  const path = process.env.GLASS_HUB_CONFIG || join(homedir(), ".glass", "hub.json");
-  if (!existsSync(path)) return null;
-  let cfg;
-  try { cfg = JSON.parse(readFileSync(path, "utf8")); } catch { return null; }
-  const need = ["tlsCert", "tlsKey", "relayHost", "tunnelKey"];
-  for (const k of need) {
-    if (!cfg[k]) { console.error(`hub: exposure config missing "${k}"; staying loopback-only`); return null; }
-  }
-  for (const f of [cfg.tlsCert, cfg.tlsKey, cfg.tunnelKey]) {
-    if (!existsSync(f)) { console.error(`hub: exposure file not found (${f}); staying loopback-only`); return null; }
-  }
-  return cfg;
+function fail(err) {
+  const message = err instanceof Error ? err.message : String(err);
+  process.stderr.write(`GLASS_BACKEND_ERROR ${message}\n`);
+  process.exitCode = 1;
 }
 
-// TCP-reachability probe (used to confirm the relay forward actually bound).
-function checkReachable(host, port, ms = 4000) {
-  return new Promise((resolve) => {
-    const s = netConnect({ host, port });
-    const done = (ok) => { try { s.destroy(); } catch { /* */ } resolve(ok); };
-    s.setTimeout(ms);
-    s.once("connect", () => done(true));
-    s.once("timeout", () => done(false));
-    s.once("error", () => done(false));
-  });
+function regular(path) {
+  return statSync(path, { throwIfNoEntry: false })?.isFile() === true;
 }
 
-// Supervised reverse tunnel relay:PORT -> 127.0.0.1:tlsPort (respawns via the
-// hub's TunnelKeeper). Uses a stable known_hosts with accept-new on first use.
-function openRelayTunnel(cfg, tlsPort) {
-  const kh = join(homedir(), ".glass", "relay_known_hosts");
-  const relayPort = cfg.relayPort || 443;
-  const ssh = [
-    "ssh", "-NT",
-    "-i", cfg.tunnelKey,
-    "-o", "ExitOnForwardFailure=yes",
-    "-o", "StrictHostKeyChecking=accept-new",
-    "-o", `UserKnownHostsFile=${kh}`,
-    "-o", "ServerAliveInterval=15",
-    "-o", "ServerAliveCountMax=3",
-    "-o", "BatchMode=yes",
-    "-R", `0.0.0.0:${relayPort}:127.0.0.1:${tlsPort}`,
-    `${cfg.relayUser || "tunnel"}@${cfg.relayHost}`,
+function servicePaths() {
+  return {
+    node: DIRECT ? process.execPath : join(SERVICE_DIR, "node"),
+    controller: DIRECT ? join(SELF_DIR, "glassd.mjs") : join(SERVICE_DIR, "glassd.mjs"),
+    pendingNode: join(SERVICE_DIR, "node.pending"),
+    pendingController: join(SERVICE_DIR, "glassd.pending.mjs"),
+    previousNode: join(SERVICE_DIR, "node.previous"),
+    previousController: join(SERVICE_DIR, "glassd.previous.mjs"),
+  };
+}
+
+function fileDigest(path) {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function resolveMain(root, pkg) {
+  const explicit = process.env[`GLASS_${pkg.toUpperCase()}_ENTRY`];
+  if (explicit) return resolve(explicit);
+  const candidates = [
+    join(root, "packages", pkg, "dist", "main.js"),
+    join(root, "node_modules", "@glass", pkg, "dist", "main.js"),
   ];
-  return spawnProc("tunnel", [HUB, "tunnel", "--", ...ssh], /tunnel: up \(pid/, 20000);
+  const found = candidates.find(regular);
+  if (!found) throw new Error(`could not resolve @glass/${pkg} entry from ${root}`);
+  return found;
 }
 
-async function standalone() {
-  mkdirSync(DIR, { recursive: true, mode: 0o700 });
-  const hub = spawnProc("hub", [HUB, "--listen", "127.0.0.1:0", "--open"], /listening on (wss?:\/\/\S+)/);
-  const port = hubPortFrom((await hub.ready).buf);
-  const SD = `${DIR}/standalone.sock`;
-  const sd = spawnProc("sessiond", [SESSIOND, "--socket", SD], /listening on/);
-  await sd.ready.catch(() => {});
-  await sleep(300);
-  const agent = spawnProc("agent", [AGENT, "--sessiond", SD, "--hub", `ws://127.0.0.1:${port}`, "--device-id", "local", "--name", "This Mac"], /registered with hub/);
-  await agent.ready;
-  ready({ role: "standalone", hubUrl: `ws://127.0.0.1:${port}`, agentId: "local" });
-}
-
-async function hub() {
-  mkdirSync(DIR, { recursive: true, mode: 0o700 });
-  const TS = `${DIR}/hub-trust.json`;
-  const HUBKEY = `${DIR}/hub-identity.json`;
-  const AGENTKEY = `${DIR}/hub-agent.json`;
-  const viewerId = process.env.VIEWER_ID;
-  const viewerPub = process.env.VIEWER_PUB;
-  if (!viewerId || !viewerPub) throw new Error("hub role needs VIEWER_ID/VIEWER_PUB (the app's device identity)");
-  trustAdd(TS, viewerId, viewerPub, "viewer");
-  const agentPub = await genKeyIfMissing("hub-agent", AGENTKEY);
-  trustAdd(TS, "hub-agent", agentPub, "agent,viewer");
-
-  // Always a loopback ws:// listener so THIS Mac's window connects with no cert.
-  // If a local exposure config is present, ALSO run a TLS wss:// listener (same
-  // hub, shared trust) tunneled to the relay, so NEO/phone can reach it.
-  const expose = loadHubExposure();
-  const args = [HUB, "--listen", "127.0.0.1:0", "--trust-store", TS, "--hub-key", HUBKEY];
-  if (expose) {
-    args.push("--tls-listen", "127.0.0.1:0", "--tls-cert", expose.tlsCert, "--tls-key", expose.tlsKey);
-    if (expose.webRoot && existsSync(expose.webRoot)) args.push("--web-root", expose.webRoot);
-    if (expose.gitRoot && existsSync(expose.gitRoot)) args.push("--git-root", expose.gitRoot);
-    // Desktop auto-update endpoint (/updates/) so spokes self-update from the hub.
-    const updatesDir = expose.updatesRoot || join(homedir(), ".glass", "updates");
-    if (existsSync(updatesDir)) args.push("--updates-root", updatesDir);
-  }
-  // With exposure there are two "listening on" lines; wait for the sentinel so
-  // both are buffered before we scrape ports. Loopback-only prints one line.
-  const readyRe = expose ? /hub: ready — \d+ listener/ : /listening on (wss?:\/\/\S+)/;
-  const h = spawnProc("hub", args, readyRe);
-  const buf = (await h.ready).buf;
-  const port = expose ? portFromScheme(buf, "ws") : hubPortFrom(buf);
-  const hubKey = buf.match(/identity key (\S+)/)[1];
-
-  let publicUrl;
-  if (expose) {
-    const tlsPort = portFromScheme(buf, "wss");
-    const host = expose.publicHost || expose.relayHost;
-    publicUrl = `wss://${host}${(expose.relayPort || 443) === 443 ? "" : `:${expose.relayPort}`}`;
-    const t = openRelayTunnel(expose, tlsPort);
-    await t.ready.catch((e) => console.error(`hub: tunnel not confirmed (${e.message}); local app still works`));
-    // The reverse forward binds a beat after ssh spawns; poll before reporting.
-    let reachable = false;
-    for (let i = 0; i < 8 && !reachable; i++) {
-      reachable = await checkReachable(expose.relayHost, expose.relayPort || 443, 3000);
-      if (!reachable) await sleep(1500);
+function runtimeDigest(entries) {
+  const hash = createHash("sha256");
+  const visit = (path, relative) => {
+    const stat = statSync(path);
+    if (stat.isDirectory()) {
+      for (const name of readdirSync(path).sort()) visit(join(path, name), join(relative, name));
+      return;
     }
-    console.error(`hub: relay ${expose.relayHost}:${expose.relayPort || 443} ${reachable ? "reachable — spokes can connect at " + publicUrl : "not confirmed reachable yet (tunnel still settling)"}`);
+    if (!stat.isFile()) return;
+    hash.update(relative);
+    hash.update(readFileSync(path));
+  };
+  for (const entry of entries) {
+    const dist = dirname(entry);
+    visit(dist, basename(dirname(dist)) + "/dist");
+  }
+  return hash.digest("hex");
+}
+
+function safeRuntimeId(value) {
+  const safe = value.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^\.+/, "");
+  if (!safe || safe.length > 100) throw new Error(`invalid runtime id ${JSON.stringify(value)}`);
+  return safe;
+}
+
+function runtimeFromRoot(root, nodePath, requestedId, digestOverride) {
+  const runtime = {
+    id: "",
+    node: resolve(nodePath),
+    hub: resolveMain(root, "hub"),
+    sessiond: resolveMain(root, "sessiond"),
+    agent: resolveMain(root, "agent"),
+    supervisor: resolveMain(root, "supervisor"),
+  };
+  const digest = digestOverride || runtimeDigest([runtime.hub, runtime.sessiond, runtime.agent, runtime.supervisor]);
+  runtime.id = safeRuntimeId(requestedId ? `${requestedId}-${digest.slice(0, 12)}` : `dev-${digest.slice(0, 12)}`);
+  return runtime;
+}
+
+function atomicCopy(source, target, mode) {
+  mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+  const temp = `${target}.${process.pid}.tmp`;
+  copyFileSync(source, temp);
+  if (mode) chmodSync(temp, mode);
+  renameSync(temp, target);
+}
+
+function prepareServiceFiles() {
+  const paths = servicePaths();
+  mkdirSync(SERVICE_DIR, { recursive: true, mode: 0o700 });
+  if (DIRECT) return paths;
+  const controllerSource = join(SELF_DIR, "glassd.mjs");
+  if (!regular(controllerSource)) throw new Error(`glassd controller is missing next to the launcher: ${controllerSource}`);
+  if (!regular(paths.controller) || !regular(paths.node)) {
+    atomicCopy(controllerSource, paths.controller, 0o600);
+    atomicCopy(SERVICE_NODE_SOURCE, paths.node, 0o755);
+    rmSync(SERVICE_UPDATE_PATH, { force: true });
+    rmSync(paths.pendingController, { force: true });
+    rmSync(paths.pendingNode, { force: true });
+    return paths;
   }
 
-  const SD = `${DIR}/hub.sock`;
-  const sd = spawnProc("sessiond", [SESSIOND, "--socket", SD], /listening on/);
-  await sd.ready.catch(() => {});
-  await sleep(300);
-  const agent = spawnProc("agent", [AGENT, "--sessiond", SD, "--hub", `ws://127.0.0.1:${port}`, "--device-id", "hub-agent", "--name", "This Mac", "--key", AGENTKEY], /registered with hub/);
-  await agent.ready;
-  ready({ role: "hub", hubUrl: `ws://127.0.0.1:${port}`, hubKey, agentId: "hub-agent", ...(publicUrl ? { publicUrl } : {}) });
+  const currentControllerId = fileDigest(paths.controller);
+  const targetControllerId = fileDigest(controllerSource);
+  const currentNodeId = fileDigest(paths.node);
+  const targetNodeId = fileDigest(SERVICE_NODE_SOURCE);
+  if (currentControllerId === targetControllerId && currentNodeId === targetNodeId) {
+    rmSync(SERVICE_UPDATE_PATH, { force: true });
+    rmSync(paths.pendingController, { force: true });
+    rmSync(paths.pendingNode, { force: true });
+    return paths;
+  }
+
+  // Stage only. Replacing the stable controller or its Node binary while it is
+  // running would make rollback impossible. Glass Doctor applies this at an
+  // explicit destructive maintenance boundary.
+  atomicCopy(controllerSource, paths.pendingController, 0o600);
+  atomicCopy(SERVICE_NODE_SOURCE, paths.pendingNode, 0o755);
+  writeFileSync(SERVICE_UPDATE_PATH, JSON.stringify({
+    v: 1,
+    version: process.env.GLASS_RUNTIME_VERSION || "unknown",
+    currentControllerId,
+    targetControllerId,
+    currentNodeId,
+    targetNodeId,
+    stagedAt: Date.now(),
+  }, null, 2) + "\n", { mode: 0o600 });
+  return paths;
 }
 
-async function spoke() {
-  mkdirSync(DIR, { recursive: true, mode: 0o700 });
-  const hubUrl = process.env.HUB_URL;
-  if (!hubUrl) throw new Error("spoke role needs HUB_URL");
-  // A spoke connects with cert validation disabled, so the hub key pin (+ channel
-  // binding) is the ONLY defense against a hostile relay MITM. Require it.
-  if (!process.env.HUB_PIN) throw new Error("spoke role needs HUB_PIN (the hub key) — refusing to connect with an unpinned hub over TLS-without-validation");
-  const AGENTKEY = `${DIR}/spoke-agent.json`;
-  // Each Mac gets a stable, UNIQUE agent id so multiple spokes never collide on
-  // the hub. Installs that persisted the old shared "spoke-agent" keep it (so
-  // they need no re-trusting); only fresh installs mint a unique id.
-  const agentId = existsSync(AGENTKEY)
-    ? JSON.parse(readFileSync(AGENTKEY, "utf8")).deviceId || "spoke-agent"
-    : `spoke-${crypto.randomUUID().slice(0, 8)}`;
-  const agentPub = await genKeyIfMissing(agentId, AGENTKEY);
-  const name = hostname();
-  const SD = `${DIR}/spoke.sock`;
-  const sd = spawnProc("sessiond", [SESSIOND, "--socket", SD], /listening on/);
-  await sd.ready.catch(() => {});
-  await sleep(300);
-  const args = [AGENT, "--sessiond", SD, "--hub", hubUrl, "--device-id", agentId, "--name", name, "--key", AGENTKEY, "--insecure-tls", "--hub-key", process.env.HUB_PIN];
-  const agent = spawnProc("agent", args, /registered with hub|HUB IDENTITY VERIFICATION FAILED/, 15000);
-  // Don't hard-fail if the agent isn't trusted yet: a brand-new spoke can't
-  // register until the viewer enrolls it (its key rides along as a companion).
-  // Wait briefly for a definitive outcome, then report ready so the viewer can
-  // drive enrollment; the agent keeps retrying and registers once approved.
-  await Promise.race([agent.ready.catch(() => {}), sleep(3000)]);
-  ready({ role: "spoke", hubUrl, agentId, agentPub, agentName: name });
+function serviceUpdateState(paths = servicePaths()) {
+  const currentControllerId = regular(paths.controller) ? fileDigest(paths.controller) : null;
+  if (DIRECT) return { pending: false, currentControllerId, mode: "direct" };
+  const update = (() => {
+    try { return JSON.parse(readFileSync(SERVICE_UPDATE_PATH, "utf8")); }
+    catch { return null; }
+  })();
+  const valid = update?.v === 1
+    && regular(paths.pendingController)
+    && regular(paths.pendingNode)
+    && fileDigest(paths.pendingController) === update.targetControllerId
+    && fileDigest(paths.pendingNode) === update.targetNodeId;
+  return {
+    pending: !!valid,
+    currentControllerId,
+    ...(valid ? {
+      targetControllerId: update.targetControllerId,
+      version: update.version,
+      stagedAt: update.stagedAt,
+    } : {}),
+  };
 }
 
-const roles = { standalone, hub, spoke };
-(roles[roleArg] ?? standalone)()
-  .then(() => new Promise(() => {})) // stay up until killed
-  .catch((e) => {
-    console.error(`GLASS_BACKEND_ERROR ${e.message}`);
-    shutdown();
+function bundledRuntime(serviceNode) {
+  const sourceModules = join(SELF_DIR, "node_modules");
+  if (!statSync(sourceModules, { throwIfNoEntry: false })?.isDirectory()) return null;
+
+  const provenance = (() => {
+    try { return JSON.parse(readFileSync(join(SELF_DIR, "provenance.json"), "utf8")); }
+    catch { return null; }
+  })();
+  const bundledDigest = typeof provenance?.runtimeDigest === "string" && /^[0-9a-f]{64}$/.test(provenance.runtimeDigest)
+    ? provenance.runtimeDigest
+    : undefined;
+  const requestedId = process.env.GLASS_RUNTIME_ID || process.env.GLASS_RUNTIME_VERSION || "bundle";
+  const source = runtimeFromRoot(SELF_DIR, serviceNode, requestedId, bundledDigest);
+  const runtimeRoot = process.env.GLASS_RUNTIME_ROOT || join(homedir(), ".glass", "runtimes");
+  const destination = join(runtimeRoot, source.id);
+  const manifestPath = join(destination, "runtime.json");
+  if (!regular(manifestPath)) {
+    mkdirSync(runtimeRoot, { recursive: true, mode: 0o700 });
+    // A prior crash may have left an uncommitted directory. No process may use
+    // a runtime until runtime.json exists, so removing this exact validated
+    // destination is safe before the atomic reinstall.
+    rmSync(destination, { recursive: true, force: true });
+    const staging = `${destination}.${process.pid}.staging`;
+    rmSync(staging, { recursive: true, force: true });
+    mkdirSync(staging, { recursive: true, mode: 0o700 });
+    cpSync(sourceModules, join(staging, "node_modules"), { recursive: true, dereference: true });
+    if (regular(join(SELF_DIR, "package.json"))) copyFileSync(join(SELF_DIR, "package.json"), join(staging, "package.json"));
+    if (regular(join(SELF_DIR, "provenance.json"))) copyFileSync(join(SELF_DIR, "provenance.json"), join(staging, "provenance.json"));
+    writeFileSync(join(staging, "runtime.json"), JSON.stringify({ v: 1, id: source.id }, null, 2) + "\n", { mode: 0o600 });
+    try {
+      renameSync(staging, destination);
+    } catch (err) {
+      // A concurrent app launch may have won the identical atomic install.
+      rmSync(staging, { recursive: true, force: true });
+      if (!regular(manifestPath)) throw err;
+    }
+  }
+  return runtimeFromRoot(destination, serviceNode, requestedId, bundledDigest);
+}
+
+function resolveRuntime(serviceNode) {
+  const explicitRoot = process.env.GLASS_RUNTIME_SOURCE;
+  if (explicitRoot) return runtimeFromRoot(resolve(explicitRoot), serviceNode, process.env.GLASS_RUNTIME_ID);
+
+  // A repo checkout is the development path.  A distributed app has no
+  // packages/*/dist next to deploy/, so its flat bundled node_modules path wins.
+  try {
+    const dev = runtimeFromRoot(REPO_ROOT, process.execPath, process.env.GLASS_RUNTIME_ID);
+    return dev;
+  } catch {
+    const bundled = bundledRuntime(serviceNode);
+    if (bundled) return bundled;
+    throw new Error("no complete Glass runtime found (hub/sessiond/agent/supervisor)");
+  }
+}
+
+function xml(value) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+function installLaunchAgent(paths) {
+  mkdirSync(dirname(PLIST_PATH), { recursive: true, mode: 0o700 });
+  const log = join(SERVICE_DIR, "glassd.log");
+  const controllerId = fileDigest(paths.controller);
+  const args = [paths.node, paths.controller, "--service-dir", SERVICE_DIR, "--config", CONFIG_PATH, "--control", CONTROL_PATH, "--controller-id", controllerId];
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>${LABEL}</string>
+  <key>ProgramArguments</key><array>${args.map((item) => `<string>${xml(item)}</string>`).join("")}</array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ProcessType</key><string>Background</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>${xml(`${dirname(paths.node)}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`)}</string>
+  </dict>
+  <key>StandardOutPath</key><string>${xml(log)}</string>
+  <key>StandardErrorPath</key><string>${xml(log)}</string>
+</dict></plist>
+`;
+  writeFileSync(PLIST_PATH, plist, { mode: 0o600 });
+
+  const domain = `gui/${process.getuid()}`;
+  const loaded = spawnSync(LAUNCHCTL, ["print", `${domain}/${LABEL}`], { stdio: "ignore" }).status === 0;
+  if (!loaded) {
+    const result = spawnSync(LAUNCHCTL, ["bootstrap", domain, PLIST_PATH], { encoding: "utf8" });
+    if (result.status !== 0) throw new Error(`could not bootstrap ${LABEL}: ${(result.stderr || result.stdout || "").trim()}`);
+  }
+  spawnSync(LAUNCHCTL, ["kickstart", `${domain}/${LABEL}`], { stdio: "ignore" });
+}
+
+function startDirect(paths) {
+  const logPath = join(SERVICE_DIR, "glassd.log");
+  const log = openSync(logPath, "a", 0o600);
+  const child = spawn(
+    paths.node,
+    [paths.controller, "--service-dir", SERVICE_DIR, "--config", CONFIG_PATH, "--control", CONTROL_PATH, "--controller-id", fileDigest(paths.controller)],
+    { detached: true, stdio: ["ignore", log, log] },
+  );
+  closeSync(log);
+  child.unref();
+}
+
+function request(payload, timeoutMs = 120_000) {
+  return new Promise((resolveRequest, reject) => {
+    const socket = netConnect(CONTROL_PATH);
+    let buffer = "";
+    let settled = false;
+    const finish = (err, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      if (err) reject(err);
+      else resolveRequest(value);
+    };
+    const timer = setTimeout(() => finish(new Error("glassd control request timed out")), timeoutMs);
+    socket.once("connect", () => socket.write(JSON.stringify(payload) + "\n"));
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) return;
+      try {
+        finish(null, JSON.parse(buffer.slice(0, newline)));
+      } catch (err) {
+        finish(err);
+      }
+    });
+    socket.once("error", (err) => finish(err));
+    socket.once("close", () => {
+      if (!settled) finish(new Error("glassd closed the control connection without a response"));
+    });
   });
+}
+
+async function reachable() {
+  return await new Promise((resolveReachable) => {
+    const socket = netConnect(CONTROL_PATH);
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolveReachable(value);
+    };
+    const timer = setTimeout(() => finish(false), 750);
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+  });
+}
+
+async function ensureService(paths) {
+  if (await reachable()) return;
+  rmSync(CONTROL_PATH, { force: true });
+  if (DIRECT) startDirect(paths);
+  else installLaunchAgent(paths);
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    if (await reachable()) return;
+    await sleep(100);
+  }
+  throw new Error(`glassd did not become reachable; see ${join(SERVICE_DIR, "glassd.log")}`);
+}
+
+async function waitForReachability(expected, timeoutMs = SERVICE_UPDATE_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await reachable()) === expected) return;
+    await sleep(100);
+  }
+  throw new Error(`glassd did not become ${expected ? "reachable" : "stopped"} within ${timeoutMs}ms`);
+}
+
+function bootoutLaunchAgent() {
+  const domain = `gui/${process.getuid()}`;
+  const result = spawnSync(LAUNCHCTL, ["bootout", `${domain}/${LABEL}`], { encoding: "utf8" });
+  if (result.status !== 0 && (awaitableText(result).trim())) {
+    throw new Error(`could not stop ${LABEL}: ${awaitableText(result).trim()}`);
+  }
+}
+
+function awaitableText(result) {
+  return String(result.stderr || result.stdout || "");
+}
+
+async function applyServiceUpdate(paths) {
+  if (DIRECT) throw new Error("service updates require the LaunchAgent mode");
+  const update = serviceUpdateState(paths);
+  const expectedControllerId = update.pending ? update.targetControllerId : update.currentControllerId;
+  atomicCopy(paths.controller, paths.previousController, 0o600);
+  atomicCopy(paths.node, paths.previousNode, 0o755);
+  bootoutLaunchAgent();
+  await waitForReachability(false);
+  await sleep(500);
+  try {
+    if (update.pending) {
+      atomicCopy(paths.pendingController, paths.controller, 0o600);
+      atomicCopy(paths.pendingNode, paths.node, 0o755);
+    }
+    installLaunchAgent(paths);
+    await waitForReachability(true);
+    const response = await request({ op: "status" }, 120_000);
+    if (!response.ok || response.status?.controllerId !== expectedControllerId || !response.status?.running) {
+      throw new Error(response.error || "replacement controller did not restore the configured backend");
+    }
+    if (update.pending) {
+      rmSync(SERVICE_UPDATE_PATH, { force: true });
+      rmSync(paths.pendingController, { force: true });
+      rmSync(paths.pendingNode, { force: true });
+    }
+    rmSync(paths.previousController, { force: true });
+    rmSync(paths.previousNode, { force: true });
+    return { updated: update.pending, restarted: true, status: response.status };
+  } catch (error) {
+    try { bootoutLaunchAgent(); } catch { /* best effort before rollback */ }
+    await waitForReachability(false).catch(() => undefined);
+    atomicCopy(paths.previousController, paths.controller, 0o600);
+    atomicCopy(paths.previousNode, paths.node, 0o755);
+    installLaunchAgent(paths);
+    await waitForReachability(true);
+    const rollback = await request({ op: "status" }, 120_000);
+    if (!rollback.ok || !rollback.status?.running) {
+      throw new Error(`service update failed and rollback did not restore the backend: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    throw new Error(`service update failed; previous controller restored: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function run() {
+  const paths = prepareServiceFiles();
+  if (has("--status")) {
+    if (!(await reachable())) return marker("GLASS_BACKEND_STATUS", { running: false, serviceUpdate: serviceUpdateState(paths) });
+    const response = await request({ op: "status" }, 3000);
+    if (!response.ok) throw new Error(response.error || "status failed");
+    return marker("GLASS_BACKEND_STATUS", { ...response.status, serviceUpdate: serviceUpdateState(paths) });
+  }
+  if (has("--apply-service-update")) {
+    const result = await applyServiceUpdate(paths);
+    return marker("GLASS_BACKEND_UPDATED", { ...result, serviceUpdate: serviceUpdateState(paths) });
+  }
+  if (has("--stop") || has("--shutdown-service")) {
+    if (!(await reachable())) return marker("GLASS_BACKEND_STOPPED");
+    const response = await request({ op: has("--shutdown-service") ? "shutdown" : "stop" });
+    if (!response.ok) throw new Error(response.error || "stop failed");
+    return marker("GLASS_BACKEND_STOPPED");
+  }
+
+  const role = arg("--role", "standalone");
+  if (!["standalone", "hub", "spoke"].includes(role)) throw new Error(`unknown backend role ${JSON.stringify(role)}`);
+  if (role === "hub" && (!process.env.VIEWER_ID || !process.env.VIEWER_PUB)) {
+    throw new Error("hub role needs VIEWER_ID and VIEWER_PUB");
+  }
+  if (role === "spoke" && (!process.env.HUB_URL || !process.env.HUB_PIN)) {
+    throw new Error("spoke role needs HUB_URL and HUB_PIN");
+  }
+
+  await ensureService(paths);
+  const runtime = resolveRuntime(paths.node);
+  const config = {
+    v: 1,
+    role,
+    runtime,
+    stateDir: resolve(STATE_DIR),
+    ...(process.env.VIEWER_ID ? { viewerId: process.env.VIEWER_ID } : {}),
+    ...(process.env.VIEWER_PUB ? { viewerPub: process.env.VIEWER_PUB } : {}),
+    ...(process.env.HUB_URL ? { hubUrl: process.env.HUB_URL } : {}),
+    ...(process.env.HUB_PIN ? { hubPin: process.env.HUB_PIN } : {}),
+  };
+  const response = await request({ op: "ensure", config });
+  if (!response.ok) throw new Error(response.error || "glassd ensure failed");
+  const status = await request({ op: "status" }, 3000);
+  marker("GLASS_BACKEND_READY", {
+    ...response.info,
+    backendStatus: status.ok ? status.status : undefined,
+    serviceUpdate: serviceUpdateState(paths),
+  });
+}
+
+run().catch(fail);

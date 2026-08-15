@@ -18,6 +18,7 @@ export const ErrorCode = z.enum([
   "device_unknown",
   "device_revoked",
   "session_not_found",
+  "run_not_found",
   "device_unreachable",
   "version_incompatible",
   "rate_limited",

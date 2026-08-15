@@ -8,8 +8,9 @@ native menus, and signed auto-update.
 ## Status: shipping
 
 `pnpm tauri build` produces a self-contained **Glass.app / Glass.dmg** that
-runs on a Mac with no node, no repo, and no setup: the backend (hub + sessiond
-+ agent) and a portable node binary are bundled into the app's Resources.
+runs on a Mac with no node, no repo, and no setup: the backend (Hub +
+supervisor + sessiond + Agent), persistent `glassd` controller, and a portable
+node binary are bundled into the app's Resources.
 First launch shows a role picker — **Standalone** (everything local),
 **Hub** (this Mac anchors the fleet), or **Spoke** (join a hub by url + pin,
 with number-match enrollment). Updates arrive via the Tauri v2 updater from
@@ -28,7 +29,8 @@ a plain browser):
 
 | Command | Does |
 |---|---|
-| `start_backend` / `stop_backend` / `backend_status` | Spawn and supervise `deploy/glass-backend.mjs` for the chosen role (kills any stale backend first; SIGTERM teardown on window close and app exit so no orphaned node processes). Resolves the dev repo when present, else the bundled backend + its portable node. Sets a real `PATH` for the whole backend tree — GUI-launched apps inherit almost none. |
+| `start_backend` / `stop_backend` / `backend_status` | Invoke the short-lived `deploy/glass-backend.mjs` control client. `start_backend` installs/attaches to the per-user `glassd` LaunchAgent; app/window exit does nothing to the service. `stop_backend` is reserved for explicit destructive reconfiguration. `backend_status` returns content-free lifecycle details for Doctor. Resolves the dev repo when present, else atomically stages the bundled runtime outside the replaceable `.app`. |
+| `apply_backend_update` | After an explicit warning and confirmation in Doctor, restart the LaunchAgent to apply a staged stable controller, portable Node, or sessiond runtime. Health-checks the controller identity and configured stack, with rollback on failure. |
 | `launch_proxied_browser` | Spawns the local browser (Chrome by default, or chromium/brave/edge) detached with the exact flag set from `agent/src/proxy/browser-profile.ts`: isolated `--user-data-dir`, `--proxy-server=socks5://<host>:<port>`, no-first-run. `socks5` (not `socks5h`) is deliberate — Chromium sends hostnames to the proxy, so DNS also resolves at the exit device. |
 | `app_version` | The version from `tauri.conf.json` (`package_info()`, **not** `CARGO_PKG_VERSION` — the stale cargo value once poisoned the updater's anti-rollback reconcile). |
 
@@ -38,9 +40,9 @@ a plain browser):
 # one-time: Rust toolchain (the Tauri CLI comes from pnpm)
 curl https://sh.rustup.rs -sSf | sh
 
-cd packages/desktop && pnpm install
+cd packages/desktop && pnpm --ignore-workspace install
 
-# 1. bundle the backend (pnpm-deploys hub/sessiond/agent flat, plus a portable
+# 1. bundle the backend (pnpm-deploys hub/sessiond/agent/supervisor flat, plus glassd and a portable
 #    official node binary, into src-tauri/backend/ — gitignored, regenerated):
 ./bundle-backend.sh
 
@@ -60,6 +62,12 @@ Notes that matter:
   files — `.pnpm` symlinks break when Tauri copies resources) and prunes
   node-pty prebuilds to darwin-arm64. The bundled node links only /System and
   /usr/lib, so it runs anywhere.
+- On first role start, the bundled service is installed under `~/.glass/service`
+  and the release is staged under `~/.glass/runtimes`. The LaunchAgent has
+  `RunAtLoad` + `KeepAlive`; only the Viewer belongs to the Tauri lifecycle.
+- A stable-controller or bundled-Node change is staged for explicit application
+  because applying it restarts sessiond. Routine app/runtime activation still
+  keeps sessiond pinned while work is live.
 - **`sign-and-notarize.sh`** deep-signs inside-out (node-pty native addon and
   spawn-helper, then the bundled node with the JIT/library entitlements from
   `entitlements.plist`, then the app), notarizes app + dmg via the
@@ -79,8 +87,13 @@ Notes that matter:
 - The updater endpoint in `tauri.conf.json` is a public hostname, baked in
   deliberately so updates work with zero config — it serves only signed
   artifacts.
+- `./release.sh verify` runs the JavaScript gates, assembles the provenance-bound
+  backend, builds an unsigned native app, and verifies the runtime inside it.
+  CI runs this on an ARM64 macOS runner. `release.sh ship` additionally requires
+  the real Etch, Codex, and Claude concurrency smoke before signing or publishing.
 
 ## Left to do
 
-- Later native bridge commands: launchd management, Keychain / Secure Enclave
-  key storage (the `Signer` seam in the viewer is where it plugs in).
+- Keychain / Secure Enclave key storage (the `Signer` seam in the viewer is
+  where it plugs in), plus live `sessiond` fd handoff for daemon updates while
+  sessions exist.

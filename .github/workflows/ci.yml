@@ -21,3 +21,20 @@ jobs:
       - run: pnpm --filter @glass/viewer typecheck
       - run: pnpm --filter @glass/viewer build
       - run: pnpm test
+
+  macos-release-candidate:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            packages/desktop/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir packages/desktop --ignore-workspace install --frozen-lockfile
+      - run: ./release.sh verify

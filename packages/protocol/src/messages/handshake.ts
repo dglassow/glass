@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { DeviceId } from "../ids.js";
 import { DeviceRole } from "./device.js";
+import { ProviderRecord } from "./run.js";
 
 /** First message on every connection. Establishes identity and version. */
 export const Hello = z.object({
@@ -18,6 +19,7 @@ export const Hello = z.object({
   appVersion: z.string(),
   /** Present and at what version, or absent. Glass detects Etch, never manages it. */
   etch: z.object({ present: z.boolean(), version: z.string().optional() }),
+  providers: z.array(ProviderRecord).optional(),
   /** iMessage bridge availability (macOS + readable Messages DB). Optional so
    *  pre-iMessage peers stay valid (additive, version rule §14). `account` is
    *  the signed-in iMessage account when detectable — it lets viewers treat

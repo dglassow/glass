@@ -19,4 +19,6 @@ export const SPEAKS_PROTOCOL = PROTOCOL_VERSION;
 
 export { PtySession, type OutputChunk, type ExitInfo } from "./pty.js";
 export { createSessiondServer, type SessiondServer } from "./server.js";
+export { ManagedRun } from "./run.js";
+export { CodexAppServer } from "./codex-app-server.js";
 export { ensureSpawnHelper } from "./spawn-helper.js";

@@ -18,6 +18,7 @@ rm -rf "$OUT"
 # symlinks), which survives Tauri's resource copy into the .app.
 ( cd "$REPO" && pnpm --filter @glass/backend-bundle --node-linker=hoisted deploy --prod "$OUT" >/dev/null )
 cp "$REPO/deploy/glass-backend.mjs" "$OUT/glass-backend.mjs"
+cp "$REPO/deploy/glassd.mjs" "$OUT/glassd.mjs"
 
 # Keep only the darwin-arm64 node-pty prebuild — the Intel/Windows ones are dead
 # weight and would be extra foreign Mach-O binaries to sign for notarization.
@@ -35,5 +36,50 @@ if [ ! -f "$CACHE/node" ]; then
 fi
 cp "$CACHE/node" "$OUT/node"
 chmod +x "$OUT/node"
+
+# Content-free provenance binds the staged runtime to the source commit and
+# release stamp. release.sh verifies this again inside Glass.app before any
+# artifact is signed or published.
+SOURCE_COMMIT="$(git -C "$REPO" rev-parse HEAD)"
+SOURCE_DIRTY=false
+[ -z "$(git -C "$REPO" status --porcelain --untracked-files=all)" ] || SOURCE_DIRTY=true
+RELEASE_VERSION="$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).version' "$REPO/release.json")"
+node - "$OUT" "$SOURCE_COMMIT" "$SOURCE_DIRTY" "$RELEASE_VERSION" <<'JS'
+const { createHash } = require("node:crypto");
+const { readdirSync, readFileSync, statSync, writeFileSync } = require("node:fs");
+const { join, relative } = require("node:path");
+const [root, sourceCommit, dirtyText, releaseVersion] = process.argv.slice(2);
+const hash = createHash("sha256");
+const contentHash = createHash("sha256");
+const isMachO = (data) => data.length >= 4 && new Set(["feedface", "feedfacf", "cefaedfe", "cffaedfe", "cafebabe", "bebafeca", "cafebabf", "bfbafeca"]).has(data.subarray(0, 4).toString("hex"));
+const visit = (path) => {
+  const stat = statSync(path);
+  if (stat.isDirectory()) {
+    for (const name of readdirSync(path).sort()) visit(join(path, name));
+    return;
+  }
+  if (!stat.isFile() || path === join(root, "provenance.json")) return;
+  const name = relative(root, path);
+  const data = readFileSync(path);
+  hash.update(name);
+  hash.update(data);
+  // Apple code signing mutates Mach-O binaries after assembly. This companion
+  // digest covers every non-Mach-O runtime file and remains verifiable inside
+  // the final signed app.
+  if (!isMachO(data)) {
+    contentHash.update(name);
+    contentHash.update(data);
+  }
+};
+visit(root);
+writeFileSync(join(root, "provenance.json"), JSON.stringify({
+  v: 1,
+  sourceCommit,
+  sourceDirty: dirtyText === "true",
+  releaseVersion,
+  runtimeDigest: hash.digest("hex"),
+  runtimeContentDigest: contentHash.digest("hex"),
+}, null, 2) + "\n", { mode: 0o600 });
+JS
 
 echo "bundle-backend: done ($(du -sh "$OUT" | cut -f1)) — node $("$OUT/node" -v)"

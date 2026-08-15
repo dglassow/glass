@@ -8,22 +8,25 @@ update distribution, git hosting), every Mac is an **Agent** (hosts sessions),
 and every device is a **Viewer** — a native app on macOS, a chat-only PWA
 everywhere else.
 
-Glass replaces Prism and supersedes Forge. Etch is a separate CLI that Glass
-detects but does not manage.
+Glass replaces Prism and supersedes Forge. Etch is the primary agent,
+with Codex and Claude as first-class alternatives. All remain separately
+installed provider runtimes that Glass detects and invokes but does not manage.
 
 ## Status
 
-Glass is deployed and running against real infrastructure. The load-bearing
-design decision — sessions live in a daemon that survives updates, so shells
-are never interrupted — is proven end-to-end, over the public internet, in a
-signed desktop app.
+Glass is deployed and running against real infrastructure. The repository's
+shipped-app lifecycle now keeps sessions in a daemon outside Glass.app and is
+proven end-to-end by the real-process acceptance harness. Publishing the next
+signed build and running the live mid-session update drill are still required
+before that new lifecycle is considered production-verified.
 
 What exists today:
 
-- **Terminal sessions that survive everything.** `sessiond` owns the PTYs;
-  the worker process above it is swapped blue/green (health-checked before the
-  old one retires, instant rollback on failure) and crashes are recovered,
-  all with shells running untouched and scrollback intact.
+- **Terminal sessions that survive routine updates.** A per-user `glassd`
+  LaunchAgent owns the backend independently of Glass.app. `sessiond` owns the
+  PTYs; Agent is swapped blue/green (health-checked before the old one retires,
+  instant rollback on failure), while Viewer relaunches and Hub restarts only
+  cause reconnects. Shells and scrollback stay untouched.
 - **Real identity.** Ed25519 device keys with challenge/response admission,
   number-matching enrollment (self-serve from the app), and a WebAuthn passkey
   bootstrap for the very first device. The hub is fail-closed.
@@ -45,8 +48,15 @@ What exists today:
 - **A fleet, not a demo.** The hub listens on loopback for its local viewer and
   over the relay for spokes; every viewer sees every agent's sessions live.
   The hub pushes update-available banners to out-of-date spokes.
-- **Chat sessions.** A `chat` session kind runs Etch non-interactively per
-  message and rides the identical session protocol as a terminal.
+- **Chat sessions.** A `chat` session kind currently runs Etch
+  non-interactively per message and rides the identical session protocol as a
+  terminal. The Agent Board adds the persistent structured Etch path and keeps
+  this one-shot mode only as compatibility for older Etch versions.
+- **Concurrent agents.** The Agent Board runs Etch, Codex, Claude, and
+  configured generic CLIs together across devices, with one attention inbox,
+  durable workspaces, proven provider readiness, restart reconciliation,
+  content-free Doctor diagnostics, and processes that survive Viewer or Agent
+  replacement. See [`docs/multi-agent.md`](docs/multi-agent.md).
 - **Cross-device browsing.** A SOCKS5 exit on one device, an isolated browser
   profile on another: render locally, egress from the machine you choose. No
   pixel streaming.
@@ -60,10 +70,11 @@ What exists today:
   The same viewer code, served by the hub over TLS, is an installable
   mobile PWA.
 
-Verified by 19 adversarial test harnesses (`pnpm test`, all in CI), plus
+Verified by 28 adversarial test harnesses (`pnpm test`, all in CI), plus
 red-team passes on the security-critical paths. Still ahead: the voice/chat
-mobile surface (Phase 5 remainder), the sessiond-to-sessiond fd handoff, and
-the full production-gate failure drill (`docs/plan.md` §16).
+mobile surface (Phase 5 remainder), the sessiond-to-sessiond fd handoff, the
+signed live update drill, and the full production-gate failure drill
+(`docs/plan.md` §16).
 
 ## Layout
 
@@ -76,11 +87,11 @@ packages/
   agent/           worker: session routing, hub link, SOCKS proxy endpoint
   viewer/          shared web frontend — webview on desktop, installable PWA on mobile
   desktop/         Tauri v2 macOS shell (workspace-excluded; needs Rust on a Mac)
-  backend-bundle/  meta-package that flattens hub/sessiond/agent into the .app's bundled backend
+  backend-bundle/  meta-package that flattens hub/sessiond/agent/supervisor into the .app backend
   cli/             glass run — secret injection with structural redaction
-deploy/            per-role backend launcher + live-relay bring-up scripts
+deploy/            persistent glassd controller, desktop control client, and live-relay scripts
 infra/lightsail/   Terraform for the relay VPS (stock sshd, zero Glass code)
-tests/             19 acceptance/adversarial harnesses — the source of truth for what works
+tests/             28 acceptance/adversarial harnesses plus an opt-in live-provider release smoke
 docs/              plan.md (architecture, authoritative) + open-questions.md
 ```
 
@@ -100,9 +111,10 @@ Message families:
 
 | Family | Covers |
 |---|---|
-| `handshake` | `hello` / challenge / proof / ack — Ed25519 mutual auth, version negotiation, channel binding, Etch detection |
+| `handshake` | `hello` / challenge / proof / ack: Ed25519 mutual auth, version negotiation, channel binding, provider advertisement |
 | `device` | number-matching enrollment, revocation, registry state |
 | `session` | create, list, attach, input, output, resize, close, exit — plus fleet-wide created/exited broadcasts |
+| `run` / `workspace` | normalized multi-provider lifecycle, streams, input/control, queries, attachments, and durable Agent Board metadata |
 | `credential` | WebAuthn passkey registration and login |
 | `vault` | authenticated machine retrieval of scoped secrets |
 | `proxy` | per-connection SOCKS tunneling between devices |
@@ -118,7 +130,8 @@ versions behind is refused.
 ### Session kinds
 
 `pty` and `chat`. Browsers are deliberately absent: they run locally and are
-proxied, never streamed, so they are not sessions.
+proxied, never streamed, so they are not sessions. Agent runs are durable
+control metadata layered over those two kinds, not another session kind.
 
 ## Development
 
@@ -126,7 +139,8 @@ proxied, never streamed, so they are not sessions.
 pnpm install
 pnpm typecheck
 pnpm build
-pnpm test        # all 19 harnesses; they spawn real processes and real git/tls
+pnpm test        # all 28 harnesses; they spawn real processes and real git/tls
+pnpm test:providers -- --runs  # release machine: real Etch + Codex + Claude
 ```
 
 The desktop shell builds separately on a Mac (Rust required) — see

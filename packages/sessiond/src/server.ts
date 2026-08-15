@@ -12,15 +12,18 @@ import { StringDecoder } from "node:string_decoder";
 import { randomUUID } from "node:crypto";
 import {
   FrameReader,
+  DeviceId,
   encodeFrame,
   makeEnvelope,
   type Body,
   type Envelope,
   type SessionRecord,
+  type RunRecord,
 } from "@glass/protocol";
 import { PtySession } from "./pty.js";
 import { ChatSession } from "./chat.js";
 import type { Session } from "./session.js";
+import { ManagedRun } from "./run.js";
 
 const SELF = "sessiond";
 
@@ -30,18 +33,23 @@ interface Conn {
   readonly decoder: StringDecoder;
   /** sessionId -> unsubscribe, for every session this connection is attached to. */
   readonly subs: Map<string, () => void>;
+  /** runId -> unsubscribe, for every structured run this peer watches. */
+  readonly runSubs: Map<string, () => void>;
   /** Address of the connected peer, used as `to` on replies. */
   peer: string;
 }
 
 export interface SessiondServer {
   readonly server: net.Server;
+  readonly instanceId: string;
   readonly sessionCount: () => number;
   readonly close: () => Promise<void>;
 }
 
-export function createSessiondServer(opts?: { maxBytesPerSession?: number }): SessiondServer {
+export function createSessiondServer(opts?: { maxBytesPerSession?: number; statusDir?: string }): SessiondServer {
+  const instanceId = randomUUID();
   const sessions = new Map<string, Session>();
+  const runs = new Map<string, ManagedRun>();
   const conns = new Set<Conn>();
   const maxBytes = opts?.maxBytesPerSession;
 
@@ -98,6 +106,17 @@ export function createSessiondServer(opts?: { maxBytesPerSession?: number }): Se
         signal: session.exit.signal,
       });
     }
+  }
+
+  function attachRun(conn: Conn, run: ManagedRun): void {
+    conn.runSubs.get(run.id)?.();
+    conn.runSubs.set(
+      run.id,
+      run.subscribe((value) => {
+        if ("kind" in value) send(conn, { type: "run.event", event: value });
+        else send(conn, { type: "run.updated", run: value as RunRecord });
+      }),
+    );
   }
 
   function handle(conn: Conn, env: Envelope): void {
@@ -168,6 +187,83 @@ export function createSessiondServer(opts?: { maxBytesPerSession?: number }): Se
         send(conn, { type: "session.renamed", session: toRecord(session) }, env.id);
         break;
       }
+      case "run.create": {
+        const run = new ManagedRun(body, opts?.statusDir ?? `${process.cwd()}/.glass-agent-status`);
+        runs.set(run.id, run);
+        attachRun(conn, run);
+        send(conn, { type: "run.created", run: run.record }, env.id);
+        break;
+      }
+      case "run.list": {
+        const records = [...runs.values()]
+          .map((run) => run.record)
+          .filter((run) => body.deviceId === undefined || run.deviceId === body.deviceId);
+        send(conn, { type: "run.listed", runs: records }, env.id);
+        break;
+      }
+      case "run.inventory": {
+        send(conn, {
+          type: "run.inventory.snapshot",
+          deviceId: DeviceId.parse(conn.peer),
+          instanceId,
+          capabilities: ["run.v1", "run.inventory.v1", "provider-readiness.v1"],
+          runs: [...runs.values()].map((run) => structuredClone(run.record)),
+        }, env.id);
+        break;
+      }
+      case "run.subscribe": {
+        const run = runs.get(body.runId);
+        if (!run) {
+          send(conn, { type: "error", code: "run_not_found", message: `no run ${body.runId}` }, env.id);
+          break;
+        }
+        attachRun(conn, run);
+        send(conn, {
+          type: "run.snapshot",
+          run: run.record,
+          events: run.events.filter((event) => event.seq > body.since),
+        }, env.id);
+        break;
+      }
+      case "run.submit":
+        runs.get(body.runId)?.submit(body.text);
+        break;
+      case "run.respond": {
+        const run = runs.get(body.runId);
+        if (run) void run.respond(body);
+        break;
+      }
+      case "run.control": {
+        const run = runs.get(body.runId);
+        if (run) void run.control(body);
+        break;
+      }
+      case "run.query": {
+        const run = runs.get(body.runId);
+        if (!run) {
+          send(conn, { type: "error", code: "run_not_found", message: `no run ${body.runId}` }, env.id);
+          break;
+        }
+        void run.query(body.query)
+          .then((result) => send(conn, { type: "run.queried", runId: body.runId, requestId: body.requestId, query: body.query, result }, env.id))
+          .catch((error: unknown) => send(conn, { type: "error", code: "internal", message: error instanceof Error ? error.message : String(error) }, env.id));
+        break;
+      }
+      case "run.attach": {
+        const run = runs.get(body.runId);
+        if (!run) {
+          send(conn, { type: "error", code: "run_not_found", message: `no run ${body.runId}` }, env.id);
+          break;
+        }
+        void run.attachFile({
+          ...(body.path ? { path: body.path } : {}),
+          ...(body.dataUrl ? { dataUrl: body.dataUrl } : {}),
+          ...(body.name ? { name: body.name } : {}),
+        })
+          .then((result) => send(conn, { type: "run.file-attached", runId: body.runId, requestId: body.requestId, result }, env.id))
+          .catch((error: unknown) => send(conn, { type: "error", code: "internal", message: error instanceof Error ? error.message : String(error) }, env.id));
+        break;
+      }
       case "heartbeat": {
         send(conn, { type: "heartbeat.ack", sentAt: body.sentAt, receivedAt: Date.now() }, env.id);
         break;
@@ -184,6 +280,7 @@ export function createSessiondServer(opts?: { maxBytesPerSession?: number }): Se
       reader: new FrameReader(),
       decoder: new StringDecoder("utf8"),
       subs: new Map(),
+      runSubs: new Map(),
       peer: "agent",
     };
     conns.add(conn);
@@ -197,6 +294,8 @@ export function createSessiondServer(opts?: { maxBytesPerSession?: number }): Se
     const cleanup = (): void => {
       for (const unsub of conn.subs.values()) unsub();
       conn.subs.clear();
+      for (const unsub of conn.runSubs.values()) unsub();
+      conn.runSubs.clear();
       conns.delete(conn);
     };
     socket.on("close", cleanup);
@@ -205,10 +304,15 @@ export function createSessiondServer(opts?: { maxBytesPerSession?: number }): Se
 
   return {
     server,
+    instanceId,
     sessionCount: () => sessions.size,
     close: () =>
       new Promise<void>((resolve) => {
         for (const s of sessions.values()) s.kill();
+        // A daemon stop is destructive to provider processes, but it is not a
+        // user request to discard provider-native session state. Preserve that
+        // distinction so the Viewer can offer a truthful resume action.
+        for (const run of runs.values()) run.close("interrupted");
         for (const c of conns) c.socket.destroy();
         server.close(() => resolve());
       }),

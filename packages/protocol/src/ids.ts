@@ -11,6 +11,9 @@ export type DeviceId = z.infer<typeof DeviceId>;
 export const SessionId = z.string().min(1).brand<"SessionId">();
 export type SessionId = z.infer<typeof SessionId>;
 
+export const RunId = z.string().min(1).brand<"RunId">();
+export type RunId = z.infer<typeof RunId>;
+
 export const MessageId = z.string().min(1).brand<"MessageId">();
 export type MessageId = z.infer<typeof MessageId>;
 

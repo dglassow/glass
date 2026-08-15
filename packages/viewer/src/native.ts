@@ -40,12 +40,35 @@ export interface BackendInfo {
   agentId?: string;
   agentPub?: string;
   agentName?: string;
+  backendStatus?: BackendStatus;
+  serviceUpdate?: ServiceUpdateStatus;
+}
+
+export interface ServiceUpdateStatus {
+  pending: boolean;
+  currentControllerId?: string | null;
+  targetControllerId?: string;
+  version?: string;
+  stagedAt?: number;
+  mode?: string;
 }
 
 export interface BackendStatus {
   running: boolean;
   role?: string;
   hubUrl?: string;
+  runtime?: string;
+  controllerId?: string;
+  controllerPid?: number;
+  hubPid?: number | null;
+  supervisorPid?: number | null;
+  sessiondUpdatePending?: boolean;
+  serviceUpdate?: ServiceUpdateStatus;
+  backendStatus?: BackendStatus;
+  supervisor?: {
+    sessiond?: { pid?: number | null; entry?: string; socket?: string };
+    worker?: { pid?: number | null; entry?: string; generation?: number };
+  };
 }
 
 export interface LaunchProxiedBrowserOptions {
@@ -202,11 +225,11 @@ function asError(e: unknown): Error {
 }
 
 /**
- * Start (or restart — the shell kills any previous backend first) the local
- * backend for a role. Spawns `node <GLASS_HOME>/deploy/glass-backend.mjs
- * --role <role>` in the Rust shell and resolves with the parsed
+ * Ensure the persistent local backend for a role. The Rust shell invokes the
+ * short-lived `glass-backend.mjs --role <role>` control client; it attaches to
+ * glassd (or installs its LaunchAgent on first use) and resolves with the parsed
  * GLASS_BACKEND_READY json; rejects with an Error on GLASS_BACKEND_ERROR,
- * spawn failure, or the ~20s readiness timeout.
+ * spawn failure, or the 120s first-activation readiness timeout.
  *
  * camelCase args here map to snake_case Rust params (Tauri convention):
  * deviceId -> device_id (VIEWER_ID), devicePub -> device_pub (VIEWER_PUB),
@@ -230,7 +253,8 @@ export async function startBackend(
   }
 }
 
-/** Stop the running local backend (SIGTERM; it reaps its own children). */
+/** Explicitly stop the persistent backend. Used only for role reconfiguration;
+ * this terminates live local sessions by design. */
 export async function stopBackend(): Promise<void> {
   const invoke = requireInvoke("stopBackend");
   try {
@@ -250,6 +274,17 @@ export async function backendStatus(): Promise<BackendStatus> {
   if (!invoke) return { running: false };
   try {
     return (await invoke("backend_status")) as BackendStatus;
+  } catch (e) {
+    throw asError(e);
+  }
+}
+
+/** Apply the staged stable-controller update. This deliberately restarts the
+ * local backend and therefore must only be called after explicit confirmation. */
+export async function applyBackendUpdate(): Promise<{ updated: boolean; restarted: boolean; status: BackendStatus; serviceUpdate?: ServiceUpdateStatus }> {
+  const invoke = requireInvoke("applyBackendUpdate");
+  try {
+    return (await invoke("apply_backend_update")) as { updated: boolean; restarted: boolean; status: BackendStatus; serviceUpdate?: ServiceUpdateStatus };
   } catch (e) {
     throw asError(e);
   }

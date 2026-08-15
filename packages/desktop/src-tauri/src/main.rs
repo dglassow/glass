@@ -3,9 +3,9 @@
 //   - launching the local browser through a SOCKS proxy with an isolated
 //     profile (you render and interact locally, egress happens from the chosen
 //     device), and
-//   - running the local Glass backend (deploy/glass-backend.mjs) for the role
-//     the user picked — standalone / hub / spoke — with its lifetime tied to
-//     the app so no node processes leak.
+//   - attaching to the persistent local Glass service for the role the user
+//     picked. deploy/glass-backend.mjs is a short-lived control client; glassd,
+//     the supervisor, and sessiond deliberately outlive this viewer process.
 // Prevents an extra console window on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -17,21 +17,22 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
+use std::os::unix::fs::PermissionsExt;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{Emitter, Manager};
-use std::os::unix::fs::PermissionsExt;
 
 // ---------------------------------------------------------------------------
 // Backend process manager
 // ---------------------------------------------------------------------------
 
-/// The one supervised backend child (deploy/glass-backend.mjs) plus what it
-/// reported at readiness, for backend_status.
+/// What the durable service most recently reported at readiness.  There is no
+/// long-lived child here: the app owns only a short-lived glassd control client.
 #[derive(Default)]
 struct BackendInner {
-    child: Option<Child>,
+    running: bool,
     role: Option<String>,
     hub_url: Option<String>,
+    details: serde_json::Value,
 }
 
 /// Managed state. The Arc lets blocking work (spawn + ready-wait, termination)
@@ -41,11 +42,11 @@ struct Backend(Arc<Mutex<BackendInner>>);
 
 const READY_MARKER: &str = "GLASS_BACKEND_READY ";
 const ERROR_MARKER: &str = "GLASS_BACKEND_ERROR ";
-const READY_TIMEOUT: Duration = Duration::from_secs(20);
+// First activation may atomically stage the bundled runtime outside the .app.
+const READY_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Stop a backend child. SIGTERM first — glass-backend.mjs traps SIGTERM and
-/// reaps its own children (hub/sessiond/agent); a straight SIGKILL would leak
-/// those grandchildren. Escalates to kill() only if it ignores SIGTERM for 5s.
+/// Stop a stuck short-lived control client. The persistent backend is not its
+/// child, so this cannot signal glassd/sessiond. Escalates if SIGTERM is ignored.
 fn terminate(child: &mut Child) {
     if matches!(child.try_wait(), Ok(Some(_))) {
         return; // already exited (try_wait reaped it)
@@ -68,21 +69,6 @@ fn terminate(child: &mut Child) {
     let _ = child.wait();
 }
 
-/// Take the current backend child (if any) out of state and terminate it.
-/// The child is moved out before the blocking wait so the mutex is never held
-/// across process teardown.
-fn kill_backend(shared: &Arc<Mutex<BackendInner>>) {
-    let child = {
-        let mut inner = shared.lock().unwrap();
-        inner.role = None;
-        inner.hub_url = None;
-        inner.child.take()
-    };
-    if let Some(mut child) = child {
-        terminate(&mut child);
-    }
-}
-
 /// Forward every line of a child stream into the channel; keep draining after
 /// the receiver is gone so the pipe never backs up the child.
 fn pump_lines<R: Read + Send + 'static>(stream: R, tx: mpsc::Sender<String>) {
@@ -103,11 +89,11 @@ fn pump_lines<R: Read + Send + 'static>(stream: R, tx: mpsc::Sender<String>) {
 /// Homebrew locations when plain "node" isn't found.
 const NODE_CANDIDATES: &[&str] = &["node", "/opt/homebrew/bin/node", "/usr/local/bin/node"];
 
-/// Spawn `node <script> --role <role>` with the given env, trying each node
-/// candidate until one exists.
+/// Spawn `node <script> <args...>` with the given env, trying each node
+/// candidate until one exists. The client exits after one control response.
 fn spawn_backend(
     script: &Path,
-    role: &str,
+    args: &[String],
     envs: &[(&str, String)],
     node_override: Option<&Path>,
 ) -> Result<Child, String> {
@@ -125,8 +111,7 @@ fn spawn_backend(
     for node in &candidates {
         let mut cmd = Command::new(node);
         cmd.arg(script)
-            .arg("--role")
-            .arg(role)
+            .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -168,10 +153,10 @@ fn spawn_backend(
     ))
 }
 
-/// Blocking body of start_backend: kill any previous backend, spawn the
-/// launcher, and scan stdout+stderr line-by-line until GLASS_BACKEND_READY
+/// Blocking body of start_backend: invoke the persistent service client and
+/// scan stdout+stderr line-by-line until GLASS_BACKEND_READY
 /// (parse + return its json), GLASS_BACKEND_ERROR (Err), process exit (Err),
-/// or the 20s deadline (Err). Both streams are scanned because the launcher
+/// or the readiness deadline (Err). Both streams are scanned because the launcher
 /// prints READY on stdout but ERROR via console.error (stderr).
 fn start_backend_blocking(
     shared: Arc<Mutex<BackendInner>>,
@@ -182,6 +167,7 @@ fn start_backend_blocking(
     hub_pin: Option<String>,
     script: PathBuf,
     node_override: Option<PathBuf>,
+    runtime_version: String,
 ) -> Result<serde_json::Value, String> {
     match role.as_str() {
         "standalone" | "hub" | "spoke" => {}
@@ -200,12 +186,10 @@ fn start_backend_blocking(
         return Err("spoke role needs hubUrl (the remote hub to join)".into());
     }
 
-    // One backend at a time: reconfiguring replaces the previous role cleanly.
-    kill_backend(&shared);
-
     // The launcher derives its own home from its location (SELF_DIR), so no
     // GLASS_HOME is needed for either the dev repo or the bundled layout.
     let mut envs: Vec<(&str, String)> = Vec::new();
+    envs.push(("GLASS_RUNTIME_VERSION", runtime_version));
     if let Some(v) = device_id {
         envs.push(("VIEWER_ID", v));
     }
@@ -219,7 +203,8 @@ fn start_backend_blocking(
         envs.push(("HUB_PIN", v));
     }
 
-    let mut child = spawn_backend(&script, &role, &envs, node_override.as_deref())?;
+    let args = vec!["--role".to_string(), role.clone()];
+    let mut child = spawn_backend(&script, &args, &envs, node_override.as_deref())?;
     let (tx, rx) = mpsc::channel::<String>();
     pump_lines(child.stdout.take().expect("stdout piped"), tx.clone());
     pump_lines(child.stderr.take().expect("stderr piped"), tx);
@@ -250,7 +235,13 @@ fn start_backend_blocking(
                                 .get("hubUrl")
                                 .and_then(|v| v.as_str())
                                 .map(String::from);
-                            inner.child = Some(child);
+                            inner.running = true;
+                            inner.details = value.clone();
+                            // The client has handed ownership to glassd and
+                            // exits immediately. Reap it; never retain a handle
+                            // whose teardown could reach the persistent stack.
+                            drop(inner);
+                            let _ = child.wait();
                             return Ok(value);
                         }
                         Err(e) => {
@@ -276,9 +267,7 @@ fn start_backend_blocking(
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 // both stream pumps ended: the launcher exited without READY
                 let _ = child.wait();
-                return Err(format!(
-                    "backend ({role}) exited before reporting ready"
-                ));
+                return Err(format!("backend ({role}) exited before reporting ready"));
             }
         }
     }
@@ -303,45 +292,145 @@ async fn start_backend(
             .to_string()
     })?;
     let shared = state.0.clone();
+    let runtime_version = app.package_info().version.to_string();
     tauri::async_runtime::spawn_blocking(move || {
-        start_backend_blocking(shared, role, device_id, device_pub, hub_url, hub_pin, script, node_override)
+        start_backend_blocking(
+            shared,
+            role,
+            device_id,
+            device_pub,
+            hub_url,
+            hub_pin,
+            script,
+            node_override,
+            runtime_version,
+        )
     })
     .await
     .map_err(|e| format!("backend launcher task failed: {e}"))?
 }
 
-/// Stop the running backend (SIGTERM so it reaps its own children). No-op if
-/// nothing is running.
+/// Explicitly stop the durable backend for role reconfiguration. This is the
+/// destructive path: glassd stops the supervisor and therefore live sessions.
 #[tauri::command]
-async fn stop_backend(state: tauri::State<'_, Backend>) -> Result<(), String> {
+async fn stop_backend(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Backend>,
+) -> Result<(), String> {
+    let (script, node_override) = resolve_backend(&app)
+        .ok_or_else(|| "could not locate the Glass backend control client".to_string())?;
     let shared = state.0.clone();
-    tauri::async_runtime::spawn_blocking(move || kill_backend(&shared))
-        .await
-        .map_err(|e| format!("backend stop task failed: {e}"))
+    tauri::async_runtime::spawn_blocking(move || {
+        let args = vec!["--stop".to_string()];
+        let mut child = spawn_backend(&script, &args, &[], node_override.as_deref())?;
+        let status = child
+            .wait()
+            .map_err(|e| format!("backend stop wait failed: {e}"))?;
+        if !status.success() {
+            return Err(format!("backend stop client exited with {status}"));
+        }
+        let mut inner = shared.lock().unwrap();
+        inner.running = false;
+        inner.role = None;
+        inner.hub_url = None;
+        inner.details = serde_json::Value::Null;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("backend stop task failed: {e}"))?
 }
 
-/// { running, role?, hubUrl? }. Reaps and reports not-running if the child
-/// died behind our back.
+/// Cached content-free lifecycle diagnostics from the latest glassd response.
 #[tauri::command]
 fn backend_status(state: tauri::State<'_, Backend>) -> serde_json::Value {
-    let mut inner = state.0.lock().unwrap();
-    let running = match inner.child.as_mut() {
-        Some(child) => match child.try_wait() {
-            Ok(None) => true,
-            Ok(Some(_)) | Err(_) => {
-                inner.child = None;
-                inner.role = None;
-                inner.hub_url = None;
-                false
-            }
-        },
-        None => false,
-    };
-    if running {
-        json!({ "running": true, "role": inner.role, "hubUrl": inner.hub_url })
+    let inner = state.0.lock().unwrap();
+    if inner.running {
+        let mut details = inner.details.clone();
+        if let Some(object) = details.as_object_mut() {
+            object.insert("running".into(), json!(true));
+            object.insert("role".into(), json!(inner.role));
+            object.insert("hubUrl".into(), json!(inner.hub_url));
+        }
+        details
     } else {
         json!({ "running": false })
     }
+}
+
+/// Apply a staged glassd/Node replacement at the user-confirmed destructive
+/// maintenance boundary. The control client performs health validation and
+/// restores the previous controller automatically if the replacement fails.
+#[tauri::command]
+async fn apply_backend_update(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Backend>,
+) -> Result<serde_json::Value, String> {
+    let (script, node_override) = resolve_backend(&app)
+        .ok_or_else(|| "could not locate the Glass backend control client".to_string())?;
+    let shared = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let args = vec!["--apply-service-update".to_string()];
+        let mut child = spawn_backend(&script, &args, &[], node_override.as_deref())?;
+        let (tx, rx) = mpsc::channel::<String>();
+        pump_lines(child.stdout.take().expect("stdout piped"), tx.clone());
+        pump_lines(child.stderr.take().expect("stderr piped"), tx);
+        let deadline = Instant::now() + READY_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                terminate(&mut child);
+                return Err("backend maintenance update timed out".into());
+            }
+            match rx.recv_timeout(remaining) {
+                Ok(line) => {
+                    if let Some(payload) = line.strip_prefix("GLASS_BACKEND_UPDATED ") {
+                        let value: serde_json::Value = serde_json::from_str(payload)
+                            .map_err(|e| format!("backend update returned invalid json: {e}"))?;
+                        let mut status = value
+                            .get("status")
+                            .cloned()
+                            .unwrap_or_else(|| json!({ "running": true }));
+                        if let (Some(object), Some(service_update)) =
+                            (status.as_object_mut(), value.get("serviceUpdate"))
+                        {
+                            object.insert("serviceUpdate".into(), service_update.clone());
+                        }
+                        let mut inner = shared.lock().unwrap();
+                        inner.running = status
+                            .get("running")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
+                        inner.role = status
+                            .get("role")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        inner.hub_url = status
+                            .get("hubUrl")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        inner.details = status;
+                        drop(inner);
+                        let _ = child.wait();
+                        return Ok(value);
+                    }
+                    if let Some(message) = line.strip_prefix(ERROR_MARKER) {
+                        terminate(&mut child);
+                        return Err(message.to_string());
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    terminate(&mut child);
+                    return Err("backend maintenance update timed out".into());
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = child.wait();
+                    return Err("backend maintenance client exited without a result".into());
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("backend update task failed: {e}"))?
 }
 
 // ---------------------------------------------------------------------------
@@ -395,7 +484,13 @@ fn launch_proxied_browser(
         (_, Some(name)) => {
             let safe: String = name
                 .chars()
-                .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
                 .collect();
             let safe = safe.trim_matches('.').to_string(); // no "." / ".." segments
             if safe.is_empty() {
@@ -407,7 +502,8 @@ fn launch_proxied_browser(
                 .join("desktop")
                 .join("browser-profiles")
                 .join(safe);
-            std::fs::create_dir_all(&dir).map_err(|e| format!("could not create profile dir: {e}"))?;
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| format!("could not create profile dir: {e}"))?;
             dir.to_string_lossy().into_owned()
         }
         _ => return Err("profileDir or profileName is required for profile isolation".into()),
@@ -496,7 +592,10 @@ fn resolve_backend(app: &tauri::AppHandle) -> Option<(PathBuf, Option<PathBuf>)>
     // (so the bundle can be exercised where the repo would otherwise win).
     if std::env::var_os("GLASS_PREFER_BUNDLED").is_none() {
         if let Some(home) = resolve_glass_home() {
-            return Some((Path::new(&home).join("deploy").join("glass-backend.mjs"), None));
+            return Some((
+                Path::new(&home).join("deploy").join("glass-backend.mjs"),
+                None,
+            ));
         }
     }
     if let Ok(res) = app.path().resource_dir() {
@@ -520,8 +619,7 @@ fn main() {
             // application menu (its title is replaced by the app name), then
             // File carries "Reconfigure…" which tells the viewer to re-run
             // role setup via the glass://reconfigure event.
-            let reconfigure =
-                MenuItemBuilder::with_id("reconfigure", "Reconfigure…").build(app)?;
+            let reconfigure = MenuItemBuilder::with_id("reconfigure", "Reconfigure…").build(app)?;
             // Standard macOS Preferences slot (app menu, Cmd+,). Opens the
             // viewer's Terminal Settings panel via the glass://settings event.
             let settings = MenuItemBuilder::with_id("settings", "Terminal Settings…")
@@ -576,27 +674,18 @@ fn main() {
             });
             Ok(())
         })
-        .on_window_event(|window, event| {
-            // Closing the main window must not leave a node backend behind.
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
-                kill_backend(&window.state::<Backend>().0);
-            }
-        })
         .invoke_handler(tauri::generate_handler![
             launch_proxied_browser,
             app_version,
             start_backend,
             stop_backend,
-            backend_status
+            backend_status,
+            apply_backend_update
         ])
         .build(tauri::generate_context!())
         .expect("error while building the Glass desktop shell");
 
-    app.run(|app_handle, event| {
-        // Belt-and-braces: whatever path led to exit (Cmd+Q, menu Quit, last
-        // window closed), the backend child is terminated before we return.
-        if let tauri::RunEvent::Exit = event {
-            kill_backend(&app_handle.state::<Backend>().0);
-        }
-    });
+    // App/window exit disconnects only the Viewer. glassd, the supervisor, and
+    // sessiond keep running so an update/relaunch reattaches to the same shells.
+    app.run(|_, _| {});
 }

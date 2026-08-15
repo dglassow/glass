@@ -10,8 +10,9 @@ import type { Readable } from "node:stream";
 export class Worker {
   readonly cp: ChildProcess;
   private ready = false;
+  private sessiondReady = false;
   private failure: string | null = null;
-  private waiters: Array<{ res: () => void; rej: (e: Error) => void }> = [];
+  private waiters: Array<{ acceptSessiond: boolean; res: () => void; rej: (e: Error) => void }> = [];
   private buf = "";
 
   constructor(
@@ -45,6 +46,11 @@ export class Worker {
         this.ready = true;
         for (const w of this.waiters) w.res();
         this.waiters = [];
+      } else if (line === "SESSIOND_READY") {
+        this.sessiondReady = true;
+        const accepted = this.waiters.filter((w) => w.acceptSessiond);
+        this.waiters = this.waiters.filter((w) => !w.acceptSessiond);
+        for (const w of accepted) w.res();
       } else if (line.startsWith("FAILED")) {
         this.failure = line;
         for (const w of this.waiters) w.rej(new Error(line));
@@ -53,11 +59,12 @@ export class Worker {
     }
   }
 
-  waitReady(timeoutMs: number): Promise<void> {
-    if (this.ready) return Promise.resolve();
+  waitReady(timeoutMs: number, acceptSessiond = false): Promise<void> {
+    if (this.ready || (acceptSessiond && this.sessiondReady)) return Promise.resolve();
     if (this.failure) return Promise.reject(new Error(this.failure));
     return new Promise<void>((res, rej) => {
       const waiter = {
+        acceptSessiond,
         res: (): void => {
           clearTimeout(timer);
           res();

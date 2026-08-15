@@ -19,6 +19,7 @@
 #   ./release.sh bump 0.1.5     # sync the version into every release-stamped file
 #   (commit, sign the tag, build: bundle-backend.sh && tauri build && sign-and-notarize.sh)
 #   ./release.sh package        # tarball + sign + manifest + publish to ~/.glass/updates
+#   ./release.sh verify         # JS gates + real bundled unsigned Glass.app on macOS
 #
 # `package` exists because the by-hand version shipped broken twice: plain macOS
 # tar embeds AppleDouble (._*) sidecar entries that Tauri's Rust unpacker chokes
@@ -79,6 +80,70 @@ check_versions() {
   echo "  version stamps agree: $ver"
 }
 
+require_clean_tree() {
+  [ -z "$(git status --porcelain --untracked-files=all)" ] \
+    || die "working tree has tracked or untracked changes; commit or stash every release input first"
+}
+
+verify_backend_bundle() {
+  local backend="$1" expected_commit="$2" expected_version="$3" cleanliness="${4:-clean}" integrity="${5:-unsigned}"
+  [ -d "$backend" ] || die "backend bundle missing at $backend"
+  local required
+  for required in \
+    glass-backend.mjs glassd.mjs node provenance.json \
+    node_modules/@glass/hub/dist/run-store.js \
+    node_modules/@glass/sessiond/dist/run.js \
+    node_modules/@glass/sessiond/dist/codex-app-server.js \
+    node_modules/@glass/agent/dist/providers.js; do
+    [ -f "$backend/$required" ] || die "backend bundle is missing $required"
+  done
+  "$backend/node" --check "$backend/glass-backend.mjs" >/dev/null
+  "$backend/node" --check "$backend/glassd.mjs" >/dev/null
+  node - "$backend" "$expected_commit" "$expected_version" "$cleanliness" "$integrity" <<'JS'
+const { createHash } = require("node:crypto");
+const { readdirSync, readFileSync, statSync } = require("node:fs");
+const { join, relative } = require("node:path");
+const [root, commit, version, cleanliness, integrity] = process.argv.slice(2);
+const path = join(root, "provenance.json");
+const value = JSON.parse(readFileSync(path, "utf8"));
+if (value.v !== 1) throw new Error("unsupported backend provenance version");
+if (value.sourceCommit !== commit) throw new Error(`backend came from ${value.sourceCommit}, expected ${commit}`);
+if (value.releaseVersion !== version) throw new Error(`backend says ${value.releaseVersion}, expected ${version}`);
+if (!/^[0-9a-f]{64}$/.test(value.runtimeDigest || "")) throw new Error("backend runtime digest is missing or invalid");
+if (!/^[0-9a-f]{64}$/.test(value.runtimeContentDigest || "")) throw new Error("backend content digest is missing or invalid");
+if (cleanliness === "clean" && value.sourceDirty) throw new Error("backend was assembled from a dirty worktree");
+const runtimeHash = createHash("sha256"), contentHash = createHash("sha256");
+const isMachO = (data) => data.length >= 4 && new Set(["feedface", "feedfacf", "cefaedfe", "cffaedfe", "cafebabe", "bebafeca", "cafebabf", "bfbafeca"]).has(data.subarray(0, 4).toString("hex"));
+const visit = (file) => {
+  const stat = statSync(file);
+  if (stat.isDirectory()) {
+    for (const name of readdirSync(file).sort()) visit(join(file, name));
+    return;
+  }
+  if (!stat.isFile() || file === path) return;
+  const name = relative(root, file), data = readFileSync(file);
+  runtimeHash.update(name); runtimeHash.update(data);
+  if (!isMachO(data)) { contentHash.update(name); contentHash.update(data); }
+};
+visit(root);
+if (contentHash.digest("hex") !== value.runtimeContentDigest) throw new Error("backend non-Mach-O content does not match provenance");
+// Code signing mutates Mach-O bytes, so the full digest is checked before
+// signing while the stable content digest remains checkable afterward.
+if (integrity !== "signed" && runtimeHash.digest("hex") !== value.runtimeDigest) throw new Error("backend runtime does not match provenance");
+JS
+  echo "  backend provenance + required runtime files verified"
+}
+
+verify_app_bundle() {
+  local app="$1" expected_commit="$2" expected_version="$3" cleanliness="${4:-clean}" integrity="${5:-unsigned}"
+  [ -d "$app" ] || die "no app at $app"
+  verify_backend_bundle "$app/Contents/Resources/backend" "$expected_commit" "$expected_version" "$cleanliness" "$integrity"
+  local built
+  built="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app/Contents/Info.plist")"
+  [ "$built" = "$expected_version" ] || die "built app is $built but expected $expected_version"
+  echo "  app version + bundled runtime verified"
+}
+
 package() {
   local app="${1:-packages/desktop/src-tauri/target/release/bundle/macos/Glass.app}"
   [ -d "$app" ] || die "no app at $app — build and sign it first"
@@ -90,6 +155,10 @@ package() {
   local built
   built="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app/Contents/Info.plist")"
   [ "$built" = "$ver" ] || die "built app is $built but the repo says $ver — rebuild before packaging"
+  local release_commit
+  release_commit="$(git rev-parse "v$ver^{commit}")" || die "signed release tag v$ver is missing"
+  [ "$release_commit" = "$(git rev-parse HEAD)" ] || die "v$ver does not point at HEAD"
+  verify_app_bundle "$app" "$release_commit" "$ver" clean signed
 
   echo "› verifying the app is signed + notarized"
   codesign --verify --deep --strict "$app" || die "codesign verify failed — run sign-and-notarize.sh first"
@@ -140,11 +209,16 @@ JS
   # manifest's `notes` field; the hub pushes them with update.available and the
   # banner's "What's changed" dialog shows them on every device. The bump
   # commits themselves ("release: vX.Y.Z") are elided as noise.
-  local endpoint url prev notes
+  local endpoint url prev notes notes_file
   endpoint="$(json_get "$TAURI_CONF" plugins.updater.endpoints.0)"
   url="${endpoint%latest.json}Glass.app.tar.gz"
   prev="$(git tag --list 'v*' --sort=-v:refname | grep -vx "v$ver" | head -1 || true)"
-  notes="$(git log --format='- %s' "${prev:+$prev..}HEAD" | grep -Ev '^- release: v[0-9]+\.[0-9]+\.[0-9]+$' || true)"
+  notes_file="docs/releases/$ver.md"
+  if [ -f "$notes_file" ]; then
+    notes="$(sed '1{/^# /d;}' "$notes_file")"
+  else
+    notes="$(git log --format='- %s' "${prev:+$prev..}HEAD" | grep -Ev '^- release: v[0-9]+\.[0-9]+\.[0-9]+$' || true)"
+  fi
   [ -n "$notes" ] && echo "  notes: $(printf '%s\n' "$notes" | wc -l | tr -d ' ') change(s) since ${prev:-the beginning}"
   GLASS_RELEASE_NOTES="$notes" node -e '
     const { readFileSync, writeFileSync } = require("fs");
@@ -171,7 +245,10 @@ ship() {
   local ver="$1"
   [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "version must be plain semver (got '$ver')"
   [ "$(git branch --show-current)" = "main" ] || die "ship only runs from main"
-  git diff-index --quiet HEAD -- || die "working tree has uncommitted changes — commit or stash first"
+  if [ "$ver" = "0.1.7" ] && [ "${GLASS_ACKNOWLEDGE_017_MIGRATION:-}" != "1" ]; then
+    die "v0.1.7 is a one-time disruptive backend migration from v0.1.6; park live work, then rerun with GLASS_ACKNOWLEDGE_017_MIGRATION=1"
+  fi
+  require_clean_tree
 
   # Resume detection: a previous ship that died mid-build left the release
   # commit + signed tag at HEAD. Anything else under an existing tag is a
@@ -200,16 +277,20 @@ ship() {
   echo "› typecheck + full test suite"
   pnpm --silent build
   pnpm --silent test
+  echo "› live Etch + Codex + Claude concurrency smoke"
+  pnpm --silent test:providers -- --runs
 
   if [ "$resuming" = 0 ]; then
     echo "› bump + release commit + signed tag"
     bump "$ver"
     git commit -qam "release: v$ver"
     git tag -s "v$ver" -m "Glass v$ver"
+    require_clean_tree
   fi
 
   echo "› bundling backend"
   packages/desktop/bundle-backend.sh
+  verify_backend_bundle packages/desktop/src-tauri/backend "$(git rev-parse HEAD)" "$ver" clean
   echo "› tauri build"
   (cd packages/desktop && pnpm --silent tauri build)
   packages/desktop/sign-and-notarize.sh
@@ -227,10 +308,29 @@ ship() {
   echo "✓ shipped v$ver — the hub is serving it; devices will show the update banner on their next check"
 }
 
+verify() {
+  command -v cargo >/dev/null || die "cargo is required for native verification"
+  echo "› typecheck + full test suite"
+  pnpm --silent build
+  pnpm --silent --filter @glass/viewer build
+  pnpm --silent test
+  echo "› assembling backend + unsigned app"
+  packages/desktop/bundle-backend.sh
+  local commit ver app
+  commit="$(git rev-parse HEAD)"
+  ver="$(json_get "$TAURI_CONF" version)"
+  verify_backend_bundle packages/desktop/src-tauri/backend "$commit" "$ver" allow-dirty
+  (cd packages/desktop && pnpm --silent tauri build --bundles app --no-sign)
+  app=packages/desktop/src-tauri/target/release/bundle/macos/Glass.app
+  verify_app_bundle "$app" "$commit" "$ver" allow-dirty
+  echo "✓ release candidate builds and contains the expected runtime"
+}
+
 case "${1:-}" in
   bump)    [ $# -eq 2 ] || die "usage: ./release.sh bump <version>"; bump "$2"
            echo "✓ bumped to $2 — commit, tag with 'git tag -s v$2', then build + sign-and-notarize + './release.sh package'" ;;
   package) shift; package "$@" ;;
+  verify)  [ $# -eq 1 ] || die "usage: ./release.sh verify"; verify ;;
   ship)    [ $# -eq 2 ] || die "usage: ./release.sh ship <version>"; ship "$2" ;;
-  *)       die "usage: ./release.sh ship <version> | ./release.sh bump <version> | ./release.sh package [Glass.app]" ;;
+  *)       die "usage: ./release.sh ship <version> | ./release.sh bump <version> | ./release.sh package [Glass.app] | ./release.sh verify" ;;
 esac

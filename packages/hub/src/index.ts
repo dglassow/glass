@@ -18,6 +18,7 @@ export const ROLE = "hub" as const;
 export const SPEAKS_PROTOCOL = PROTOCOL_VERSION;
 
 export { startHubServer, type HubServer } from "./server.js";
+export { RunStore } from "./run-store.js";
 export {
   Updater,
   GitUpdateSource,

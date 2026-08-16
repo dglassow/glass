@@ -162,7 +162,12 @@ export class ManagedRun {
     } else if (request.action === "interrupt") {
       this.child?.kill("SIGINT");
     }
-    if (request.action === "interrupt") this.setState("interrupted");
+    if (request.action === "interrupt") {
+      this.setState("interrupted");
+      // The structured-etch drain loop parks with busy=true awaiting
+      // message.complete, which an interrupted turn may never emit.
+      if (this.etch) this.busy = false;
+    }
   }
 
   async query(query: RunQueryName): Promise<Record<string, unknown>> {
@@ -422,6 +427,9 @@ export class ManagedRun {
           resolveRun();
         } else reject(new Error(stderr.trim() || `${provider} exited with code ${code}`));
       });
+      // A spawn failure or early exit must reject via the child handlers, not
+      // crash sessiond with an unhandled stdin EPIPE.
+      child.stdin.on("error", () => {});
       if (provider === "etch") child.stdin.end();
       else child.stdin.end(prompt);
     });
@@ -508,6 +516,10 @@ export class ManagedRun {
     else if (type === "error") {
       this.emit("error", payload);
       this.setState("failed");
+      // A failed turn never emits message.complete; release the drain loop so
+      // later submits aren't queued forever.
+      this.busy = false;
+      if (this.queue.length) void this.drain();
     } else if (type === "session.info") {
       this.lastSessionInfo = structuredClone(payload);
       this.emit("status", payload);
@@ -595,6 +607,7 @@ class EtchSurface {
   private nextId = 1;
   private stdout = "";
   private stderr = "";
+  private failed: Error | null = null;
   private readyResolve!: (payload: Record<string, any>) => void;
   private readyReject!: (error: Error) => void;
   private readonly readyPromise: Promise<Record<string, any>>;
@@ -610,11 +623,15 @@ class EtchSurface {
     this.child.stderr.on("data", (chunk: Buffer) => { this.stderr = (this.stderr + chunk.toString("utf8")).slice(-64 * 1024); });
     this.child.once("error", (error) => this.fail(error));
     this.child.once("close", (code) => this.fail(new Error(this.stderr.trim() || `Etch surface exited with code ${code}`)));
+    // A dead surface must surface via close/fail, not as an unhandled stdin
+    // EPIPE that would take down sessiond (and every PTY with it).
+    this.child.stdin.on("error", () => {});
   }
 
   ready(): Promise<Record<string, any>> { return this.readyPromise; }
 
   request(method: string, params: Record<string, unknown>): Promise<Record<string, any>> {
+    if (this.failed) return Promise.reject(this.failed);
     const id = this.nextId++;
     return new Promise((resolveRequest, reject) => {
       this.pending.set(id, { resolve: resolveRequest, reject });
@@ -655,6 +672,8 @@ class EtchSurface {
   }
 
   private fail(error: Error): void {
+    if (this.failed) return;
+    this.failed = error;
     this.readyReject(error);
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();

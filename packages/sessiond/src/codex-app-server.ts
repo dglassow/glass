@@ -34,6 +34,9 @@ export class CodexAppServer {
     this.child.stderr.on("data", (chunk: Buffer) => { this.stderr = (this.stderr + chunk.toString("utf8")).slice(-64 * 1024); });
     this.child.once("error", (error) => this.fail(error));
     this.child.once("close", (code) => this.fail(new Error(this.stderr.trim() || `Codex app-server exited with code ${code}`)));
+    // A dead app-server must surface via close/fail, not as an unhandled stdin
+    // EPIPE that would take down sessiond (and every PTY with it).
+    this.child.stdin.on("error", () => {});
   }
 
   async initialize(input: { cwd?: string; model?: string; modelProvider?: string; resumeThreadId?: string }): Promise<string> {
@@ -115,7 +118,10 @@ export class CodexAppServer {
   }
 
   private notify(method: string, params: Json): void { this.write({ jsonrpc: "2.0", method, params }); }
-  private write(frame: Json): void { this.child.stdin.write(JSON.stringify(frame) + "\n"); }
+  private write(frame: Json): void {
+    if (this.failed || !this.child.stdin.writable) return;
+    this.child.stdin.write(JSON.stringify(frame) + "\n");
+  }
 
   private consume(chunk: string): void {
     this.stdout += chunk;

@@ -11,6 +11,10 @@ export class AgentBoard {
   private devices: DeviceRecord[] = [];
   private selected: RunRecord["id"] | null = null;
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The mounted stream element for the selected run, so high-frequency
+   *  provider events append in place instead of rebuilding the whole board
+   *  (a full rebuild destroys any text selection the user is making). */
+  private live: { runId: string; stream: HTMLElement; rendered: number } | null = null;
 
   constructor(private readonly client: HubClient) {
     this.el.className = "agent-board";
@@ -32,9 +36,12 @@ export class AgentBoard {
   }
 
   upsert(run: RunRecord): void {
+    const previous = this.runs.get(run.id);
     this.runs.set(run.id, run);
     this.selected ??= run.id;
-    this.render();
+    // A no-op update (heartbeat re-broadcast) must not rebuild the DOM: a full
+    // render tears down any selection the user is dragging in the stream.
+    if (!previous || JSON.stringify(previous) !== JSON.stringify(run)) this.render();
     this.scheduleSave();
   }
 
@@ -42,9 +49,24 @@ export class AgentBoard {
     const list = this.events.get(event.runId) ?? [];
     if (!list.some((item) => item.seq === event.seq)) list.push(event);
     list.sort((a, b) => a.seq - b.seq);
-    if (list.length > 5000) list.splice(0, list.length - 5000);
+    const trimmed = list.length > 5000;
+    if (trimmed) list.splice(0, list.length - 5000);
     this.events.set(event.runId, list);
-    if (this.selected === event.runId) this.render();
+    if (this.selected !== event.runId) return;
+    // Fast path: the event landed at the tail of the mounted stream — append
+    // one row in place. Anything irregular (backfill, trim, stream not
+    // mounted) falls back to a full render.
+    const live = this.live;
+    if (!trimmed && live && live.runId === event.runId && live.stream.isConnected
+      && list.length === live.rendered + 1 && list[list.length - 1] === event) {
+      if (live.rendered === 0) live.stream.textContent = ""; // drop the waiting placeholder
+      const nearBottom = live.stream.scrollTop + live.stream.clientHeight >= live.stream.scrollHeight - 48;
+      live.stream.append(this.renderEvent(event));
+      live.rendered = list.length;
+      if (nearBottom) live.stream.scrollTop = live.stream.scrollHeight;
+      return;
+    }
+    this.render();
   }
 
   show(value: boolean): void {
@@ -131,6 +153,7 @@ export class AgentBoard {
     detail.className = "agent-detail";
     const run = this.selected ? this.runs.get(this.selected) : undefined;
     if (!run) {
+      this.live = null;
       const empty = document.createElement("div");
       empty.className = "agent-detail-empty";
       empty.textContent = "Create an Etch run, or select a run to inspect its live event stream.";
@@ -224,8 +247,15 @@ export class AgentBoard {
 
     const stream = document.createElement("div");
     stream.className = "agent-stream";
-    for (const event of this.events.get(run.id) ?? []) stream.append(this.renderEvent(event));
+    const events = this.events.get(run.id) ?? [];
+    for (const event of events) stream.append(this.renderEvent(event));
     if (!stream.childElementCount) stream.textContent = "Waiting for provider events…";
+    // Rebuilding the same run's stream: keep the user's scroll position if they
+    // had scrolled up (e.g. to read or select earlier output).
+    const priorScroll = this.live && this.live.runId === run.id && this.live.stream.isConnected
+      ? { top: this.live.stream.scrollTop, nearBottom: this.live.stream.scrollTop + this.live.stream.clientHeight >= this.live.stream.scrollHeight - 48 }
+      : null;
+    this.live = { runId: run.id, stream, rendered: events.length };
 
     const composer = document.createElement("form");
     composer.className = "agent-compose";
@@ -263,7 +293,9 @@ export class AgentBoard {
     } else {
       detail.append(head, stream, composer);
     }
-    queueMicrotask(() => { stream.scrollTop = stream.scrollHeight; });
+    queueMicrotask(() => {
+      stream.scrollTop = priorScroll && !priorScroll.nearBottom ? priorScroll.top : stream.scrollHeight;
+    });
     return detail;
   }
 
